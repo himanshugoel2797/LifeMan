@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from lifeman.auth import require_auth
 from lifeman.db import get_db
@@ -31,8 +31,8 @@ async def post_memory(body: RecordMemoryRequest, _: str = Depends(require_auth))
 @router.get("", response_model=list[Memory])
 async def get_memories(
     query: str | None = None,
-    type: list[str] | None = None,
-    tags: list[str] | None = None,
+    type: list[str] | None = Query(default=None),
+    tags: list[str] | None = Query(default=None),
     before: str | None = None,
     after: str | None = None,
     limit: int = 25,

@@ -9,6 +9,14 @@ import pytest
 from lifeman.memory import recall, record_memory
 
 
+async def _stored_memory_id(db, event_id: str) -> str:
+    rows = await db.execute_fetchall(
+        "SELECT external_id FROM memory_dispatches WHERE event_id = ?",
+        (event_id,),
+    )
+    return rows[0]["external_id"]
+
+
 @pytest.mark.asyncio
 async def test_typed_content_stored(temp_db):
     res = await record_memory(
@@ -18,19 +26,10 @@ async def test_typed_content_stored(temp_db):
         reason="conversation observation",
     )
     assert res.dispatched == ["memory_store"]
+    mem_id = await _stored_memory_id(temp_db, res.event_id)
     rows = await temp_db.execute_fetchall(
         "SELECT content, type, tags_json FROM memories WHERE id = ?",
-        (json.loads(  # delivery_id stored in dispatches
-            (await temp_db.execute_fetchall(
-                "SELECT external_id FROM memory_dispatches WHERE event_id = ?",
-                (res.event_id,),
-            ))[0]["external_id"]
-        ) if False else (
-            await temp_db.execute_fetchall(
-                "SELECT external_id FROM memory_dispatches WHERE event_id = ?",
-                (res.event_id,),
-            )
-        )[0]["external_id"],),
+        (mem_id,),
     )
     r = dict(rows[0])
     assert r["content"] == "user prefers tea over coffee"
@@ -59,11 +58,7 @@ async def test_private_without_tags_routed_to_review(temp_db):
         reason="t",
     )
     assert res.dispatched == ["memory_store"]
-    rows = await temp_db.execute_fetchall(
-        "SELECT external_id FROM memory_dispatches WHERE event_id = ?",
-        (res.event_id,),
-    )
-    mem_id = rows[0]["external_id"]
+    mem_id = await _stored_memory_id(temp_db, res.event_id)
     mem = await temp_db.execute_fetchall(
         "SELECT tags_json FROM memories WHERE id = ?", (mem_id,),
     )
@@ -95,3 +90,15 @@ async def test_recall_filters_by_tags(temp_db):
     await record_memory(content="user codes in Go",  tags=["work"],  reason="t")
     found = await recall(query="user", tags=["work"])
     assert all("work" in m.tags for m in found)
+    assert any("Go" in m.content for m in found)
+
+
+@pytest.mark.asyncio
+async def test_recall_tag_filter_is_and_not_or(temp_db):
+    """Multiple requested tags must ALL be present, not any-of."""
+    await record_memory(content="alpha bravo entry", tags=["alpha", "bravo"], reason="t")
+    await record_memory(content="alpha only entry",  tags=["alpha"],          reason="t")
+    await record_memory(content="bravo only entry",  tags=["bravo"],          reason="t")
+    both = await recall(tags=["alpha", "bravo"])
+    contents = {m.content for m in both}
+    assert contents == {"alpha bravo entry"}
