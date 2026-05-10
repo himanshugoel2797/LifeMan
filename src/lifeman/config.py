@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     # Server
     host: str = "127.0.0.1"
     port: int = 8390
+    # Allow non-loopback clients to reach the API (only via paired device
+    # tokens — the master token is still rejected over the wire). When
+    # false the kernel refuses to bind to anything but loopback and rejects
+    # any non-loopback request at the middleware. Flip on once you've paired
+    # a companion device and want it to reach the kernel from the LAN.
+    allow_network: bool = False
 
     # Sandbox
     sandbox_enabled: bool = True

@@ -108,21 +108,27 @@ app = FastAPI(
 
 @app.middleware("http")
 async def _refuse_non_loopback_clients(request: Request, call_next):
-    """Reject any request whose client is not the loopback interface.
+    """Gate non-loopback peers.
 
-    Defence in depth: even if the bind check above were bypassed (a future
-    entry point, a misconfigured reverse proxy that forwards directly without
-    rewriting the peer), refuse to serve at the request layer too. The UI is
-    unauthenticated and templates the bearer token into every page; serving
-    it over a network would leak it.
+    The UI is unauthenticated by design — the page itself templates the
+    master bearer token into ``window.LIFEMAN_TOKEN`` for the browser to
+    fetch with. Exposing any non-API path over the network would leak it.
+
+    With ``LIFEMAN_ALLOW_NETWORK=true`` (the post-pairing mode), we still
+    reject every non-loopback request to the UI surface and the static
+    files, but we let API routes through so paired devices can reach
+    them. ``require_auth`` then gates each call: master tokens are still
+    rejected over the wire, only paired device tokens succeed.
     """
     client = request.client
-    if client is not None and client.host not in _LOOPBACK_HOSTS:
-        return JSONResponse(
-            {"error": "non-loopback access denied"},
-            status_code=403,
-        )
-    return await call_next(request)
+    if client is None or client.host in _LOOPBACK_HOSTS:
+        return await call_next(request)
+    if settings.allow_network and request.url.path.startswith("/api/"):
+        return await call_next(request)
+    return JSONResponse(
+        {"error": "non-loopback access denied"},
+        status_code=403,
+    )
 
 
 # Mount static files
@@ -153,21 +159,30 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def _enforce_loopback_only(host: str) -> None:
-    """Refuse to bind to a non-loopback address.
+    """Refuse to bind to a non-loopback address unless explicitly allowed.
 
     The UI surface is unauthenticated by design (browser sessions don't carry
-    bearer tokens, and the page itself templates the token in for JS). On a
-    non-loopback bind, that would expose the audit log, schedule list,
+    bearer tokens, and the page itself templates the master token in for JS).
+    On a non-loopback bind, that would expose the audit log, schedule list,
     secrets metadata, chat history, and the bearer token itself to anyone on
-    the network. Until the UI grows a real cookie-based login, refuse.
+    the network.
+
+    Setting ``LIFEMAN_ALLOW_NETWORK=true`` flips on the device-token model:
+    the kernel will bind to any host, the per-request middleware rejects
+    non-loopback access to the UI surface, and the API surface accepts only
+    paired device tokens (the master token is still rejected over the wire).
     """
     if host in _LOOPBACK_HOSTS:
+        return
+    if settings.allow_network:
         return
     raise SystemExit(
         f"Refusing to bind to non-loopback host {host!r}: the UI is currently "
         "unauthenticated and exposing it on a network would leak the audit log, "
         "secrets metadata, and the API bearer token. Set LIFEMAN_HOST=127.0.0.1 "
-        "(or 'localhost' / '::1'), or implement UI auth before binding wider."
+        "(or 'localhost' / '::1'), or set LIFEMAN_ALLOW_NETWORK=true after "
+        "pairing a device — that locks the UI to loopback while letting paired "
+        "devices reach the API over the network."
     )
 
 

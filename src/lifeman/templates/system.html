@@ -124,6 +124,103 @@
 <div class="empty">No backups yet. Click "Create backup now" to take one.</div>
 {% endif %}
 
+<h2>Paired devices</h2>
+<p class="reason">
+    Long-lived per-device tokens. Pair a phone or tablet here, then point
+    its lifeman client at <code>http://{{ request.url.hostname }}:{{ request.url.port or 8390 }}</code>.
+    {% if allow_network %}
+        Network access is <strong>enabled</strong> — paired devices can reach the API from the LAN.
+    {% else %}
+        Network access is <strong>disabled</strong> — devices can pair, but
+        <code>LIFEMAN_ALLOW_NETWORK=true</code> must be set for them to reach
+        the API from anywhere but loopback.
+    {% endif %}
+</p>
+
+<div class="btn-group" style="margin-bottom: 16px;">
+    <button type="button" id="device-pair-btn" class="btn btn-success">+ Generate pairing code</button>
+</div>
+
+<div id="device-pair-code" style="display:none; margin-bottom: 16px; padding: 12px; border: 1px solid var(--border); border-radius: 6px;">
+    <p style="margin:0 0 8px;"><strong>Pairing code</strong> — single-use, expires in 5 minutes.</p>
+    <code id="device-pair-code-value" style="font-size: 20px; letter-spacing: 4px;"></code>
+    <p class="reason" style="margin-top: 8px;">
+        Enter this on the new device. Once consumed, the device receives a
+        long-lived token; this code stops working immediately.
+    </p>
+</div>
+
+{% if devices %}
+<table>
+    <thead><tr><th>Name</th><th>Platform</th><th>Paired</th><th>Last seen</th><th>State</th><th>Actions</th></tr></thead>
+    <tbody>
+        {% for d in devices %}
+        <tr>
+            <td>{{ d.name }}</td>
+            <td><span class="tag">{{ d.platform or '—' }}</span></td>
+            <td class="timestamp">{{ d.created_at[:19] }}</td>
+            <td class="timestamp">{{ d.last_seen_at[:19] if d.last_seen_at else '—' }}</td>
+            <td>
+                {% if d.revoked_at %}
+                    <span class="tag" style="color:var(--danger)">revoked {{ d.revoked_at[:19] }}</span>
+                {% else %}
+                    <span class="tag" style="color:var(--success)">active</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if not d.revoked_at %}
+                <button class="btn btn-danger" data-action="revoke-device" data-id="{{ d.id }}">Revoke</button>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No devices paired yet.</div>
+{% endif %}
+
+<script>
+document.getElementById('device-pair-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('device-pair-btn');
+    btn.disabled = true;
+    btn.textContent = 'Generating…';
+    try {
+        const r = await window.lifemanFetch('/api/auth/pairing-codes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ note: '' }),
+        });
+        if (!r.ok) {
+            const t = await r.text();
+            window.toast('Pairing code failed: ' + t.slice(0, 200), 'err');
+            return;
+        }
+        const body = await r.json();
+        document.getElementById('device-pair-code-value').textContent = body.code;
+        document.getElementById('device-pair-code').style.display = 'block';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '+ Generate pairing code';
+    }
+});
+
+document.querySelectorAll('button[data-action="revoke-device"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        if (!confirm('Revoke this device? The token will stop working immediately.')) return;
+        const r = await window.lifemanFetch('/api/auth/devices/' + encodeURIComponent(id), { method: 'DELETE' });
+        if (!r.ok) {
+            const t = await r.text();
+            window.toast('Revoke failed: ' + t.slice(0, 200), 'err');
+            return;
+        }
+        window.toast('Device revoked.', 'ok');
+        setTimeout(() => location.reload(), 600);
+    });
+});
+</script>
+
 <script>
 document.getElementById('backup-create-btn').addEventListener('click', async () => {
     const btn = document.getElementById('backup-create-btn');

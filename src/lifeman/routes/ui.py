@@ -558,6 +558,10 @@ async def system_page(request: Request):
     )
 
     backups = list_backups()
+
+    from lifeman import devices as _devices
+    paired = await _devices.list_devices(include_revoked=True)
+
     return templates.TemplateResponse(
         request,
         "system.html",
@@ -572,6 +576,8 @@ async def system_page(request: Request):
                 "retention_count": _settings.backup_retention_count,
                 "backup_dir": str(_settings.get_backup_dir()),
             },
+            "devices": [d.__dict__ for d in paired],
+            "allow_network": _settings.allow_network,
         },
     )
 
@@ -585,17 +591,20 @@ async def sse_events(
     """SSE stream. Pass `?since_seq=N` to replay events newer than N from the
     bus's in-memory ring buffer.
 
-    Requires `?token=<bearer>` because EventSource can't set Authorization
-    headers. The UI template appends `window.LIFEMAN_TOKEN` automatically.
+    Requires a bearer token because EventSource can't set Authorization
+    headers; pass it via ``?token=`` (browsers — the UI template appends
+    ``window.LIFEMAN_TOKEN`` automatically) or the ``Authorization``
+    header (non-browser clients). Both the master token (loopback only)
+    and paired device tokens are accepted; ``resolve_query_token`` enforces
+    the same rules as the regular auth dependency.
     """
-    # Accept the token from either the Authorization header (for non-browser
-    # clients) or the query param (browsers, since EventSource has no header
-    # API). Local-only server, but still don't leak permission/output events
-    # to any process that can hit 127.0.0.1.
+    from lifeman.auth import resolve_query_token
+
     auth = request.headers.get("authorization") or ""
     header_token = auth.removeprefix("Bearer ").strip() if auth.lower().startswith("bearer ") else ""
     supplied = token or header_token
-    if supplied != settings.token:
+    principal = await resolve_query_token(request, supplied)
+    if principal is None:
         raise HTTPException(status_code=401, detail="Invalid or missing token")
     async def event_generator():
         async for msg in bus.subscribe(since_seq=since_seq):

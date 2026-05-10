@@ -477,6 +477,37 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (11, "ALTER TABLE output_deliveries ADD COLUMN status TEXT NOT NULL DEFAULT 'delivered'"),
     # Per-fire idempotence key for scheduled invocations (see scheduler.py).
     (12, "ALTER TABLE invocations ADD COLUMN fire_id TEXT"),
+    # Device pairing — long-lived per-device bearer credentials issued by
+    # consuming a pairing_code. Tokens are stored hashed (sha256), never
+    # plaintext at rest. See docs/concepts/auth.md.
+    (
+        13,
+        """
+        CREATE TABLE IF NOT EXISTS device_tokens (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT '',
+            token_hash TEXT NOT NULL UNIQUE,
+            capabilities_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT,
+            revoked_at TEXT
+        )
+        """,
+    ),
+    (
+        14,
+        """
+        CREATE TABLE IF NOT EXISTS pairing_codes (
+            code TEXT PRIMARY KEY,
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            device_id TEXT,
+            note TEXT NOT NULL DEFAULT ''
+        )
+        """,
+    ),
 ]
 
 

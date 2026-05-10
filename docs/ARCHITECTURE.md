@@ -59,11 +59,15 @@ See [mcp_server.py](src/lifeman/mcp_server.py) and `chat_tools.py`.
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-`cli()` refuses to bind to anything but a loopback host
-([main.py:96-115](src/lifeman/main.py#L96-L115)). The UI is unauthenticated
-by design (it inlines the bearer token into every page), so a public bind
-would leak everything. Running `uvicorn lifeman.main:app` directly bypasses
-this guard — see REVIEW.md.
+By default `cli()` refuses to bind to anything but a loopback host
+([main.py](src/lifeman/main.py)) — the UI is unauthenticated and inlines
+the master bearer token, so a public bind would leak everything. Setting
+`LIFEMAN_ALLOW_NETWORK=true` flips the kernel into the device-token mode:
+the bind guard relaxes, the request middleware still rejects non-loopback
+peers on `/`, `/static`, and `/events`, but lets `/api/*` through so paired
+devices can reach the API. The auth dependency then refuses the master
+token over the wire and only accepts paired-device tokens. See
+[concepts/auth.md](concepts/auth.md).
 
 ## Storage
 
@@ -97,6 +101,8 @@ Tables, grouped:
 - **Build queue:** `build_requests`.
 - **LLM accounting:** `llm_usage` (one row per inference call with
   `surface`, `session_id`, prompt/completion/total tokens, latency).
+- **Auth:** `device_tokens` (paired companion-app credentials, hashed
+  at rest), `pairing_codes` (single-use, 5-minute TTL).
 
 Memory tier: a single `memories` table written by the built-in
 `memory_store` handler; the design's "memory tool owns its schema"
@@ -174,6 +180,10 @@ Endpoints in one place:
 | system | `GET /api/user/status` | placeholder |
 | system | `GET /api/now` / `POST /api/sleep` | utilities (auth-gated) |
 | system | `GET /api/sessions/current` | minimal "most recent session" shim |
+| auth | `POST /api/auth/pairing-codes` | mint single-use code (master/loopback only) |
+| auth | `POST /api/auth/pair` | consume code, return device token (no auth required) |
+| auth | `GET /api/auth/devices` | list paired devices |
+| auth | `DELETE /api/auth/devices/{id}` | revoke a device |
 
 ### Web UI (`/`)
 

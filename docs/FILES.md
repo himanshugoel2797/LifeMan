@@ -22,8 +22,15 @@ REVIEW.md.
   schema change means appending one `(id, sql)` tuple — never
   renumber, never edit a past id. `close_db()` for shutdown.
 - [`auth.py`](src/lifeman/auth.py) — `HTTPBearer` dependency
-  `require_auth` that gates `/api/*`. UI routes are unauthenticated;
-  `main.py` blocks non-loopback binds to keep that safe.
+  `require_auth` that gates `/api/*`. Resolves the request to a
+  `Principal` (`master` or `device`) and rejects the master token
+  whenever the peer isn't loopback so it can't leak over the wire.
+  `resolve_query_token` is the parallel helper for SSE / WebSocket
+  endpoints that take `?token=`.
+- [`devices.py`](src/lifeman/devices.py) — pairing-code generation
+  (Crockford base32, 5-min TTL, single-use), `consume_pairing_code`
+  with atomic claim, sha256 token hashing, list / revoke helpers.
+  Companion-app credentials live here; never persists plaintext tokens.
 - [`models.py`](src/lifeman/models.py) — Pydantic models for the HTTP
   API surface: tools, manifests, permissions, schedules, invocations,
   audit, build requests, sessions, chat messages, generic responses.
@@ -144,6 +151,10 @@ REVIEW.md.
   filterable by surface/session/since), `system/backups`
   (list / create / restore), `audit`, `user/status`, `now`, `sleep`,
   plus a minimal `sessions/current` shim distinct from chat sessions.
+- [`auth.py`](src/lifeman/routes/auth.py) — pairing endpoints:
+  `POST /pairing-codes` (master/loopback only), `POST /pair`
+  (no auth — the code is the credential), `GET /devices`,
+  `DELETE /devices/{id}` (devices may revoke themselves only).
 - [`ui.py`](src/lifeman/routes/ui.py) — Jinja2-rendered dashboard,
   tools list + detail, permissions, schedules, chat index + session,
   activity feed, audit log, plus `/events` SSE endpoint

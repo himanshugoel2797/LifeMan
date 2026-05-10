@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from lifeman.routes import (
+    auth,
     build_requests,
     chat,
     inputs,
@@ -28,6 +29,7 @@ api_router.include_router(memory.router, prefix="/memory", tags=["memory"])
 api_router.include_router(observations.router, prefix="/observations", tags=["observations"])
 api_router.include_router(secrets.router, prefix="/secrets", tags=["secrets"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
+api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(system.router, tags=["system"])
 
 ui_router = ui.router

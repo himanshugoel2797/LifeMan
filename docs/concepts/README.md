@@ -28,3 +28,4 @@ implements them.
 | [chat_surfaces.md](chat_surfaces.md) | Live chat (Qwen) vs build chat (Claude Code) |
 | [audit_log.md](audit_log.md) | Mutation log, what's logged where, observation carve-out |
 | [sse.md](sse.md) | Event bus, replay cursor, dropped-event handling |
+| [auth.md](auth.md) | Master token vs device tokens, pairing flow, loopback gate |

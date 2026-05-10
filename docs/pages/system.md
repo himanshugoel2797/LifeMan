@@ -3,8 +3,9 @@
 Template: [system.html](src/lifeman/templates/system.html). Route:
 `system_page` in [ui.py](src/lifeman/routes/ui.py).
 
-Read-only summary of operational state: LLM token usage and the
-encrypted backup queue. Mutations go through `/api/system/...`.
+Read-only summary of operational state: LLM token usage, paired
+devices, and the encrypted backup queue. Mutations go through
+`/api/system/...` and `/api/auth/...`.
 
 ## LLM usage
 

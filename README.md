@@ -32,6 +32,7 @@ Design docs: [DESIGN.MD](DESIGN.MD) (kernel), [OUTPUT_DESIGN.MD](OUTPUT_DESIGN.M
 - **MCP server** — 36 tools exposed to the local LLM (scheduling, sync + async tool invocation, permissions, memory CRUD, notifications, observations, inputs)
 - **Encrypted backups** — daily `VACUUM INTO` + AES-256-GCM snapshots (master key required to restore)
 - **LLM usage accounting** — every chat turn + router fallback records token counts and latency
+- **Device pairing** — companion apps pair via single-use code, get a hashed-at-rest device token (master token stays loopback-only)
 - **Web UI** — dashboard, tool browser, permission prompts, schedule viewer, audit log
 
 ## Stack
@@ -130,6 +131,10 @@ curl -X POST http://localhost:8390/api/schedules \
 | `GET` | `/api/outputs/rule-proposals` | LLM-fallback channel picks pending review |
 | `POST` | `/api/outputs/rule-proposals/{id}/accept` | Promote a proposal into a real routing rule |
 | `DELETE` | `/api/outputs/rule-proposals/{id}` | Dismiss a proposal |
+| `POST` | `/api/auth/pairing-codes` | Mint a single-use pairing code (loopback / master only) |
+| `POST` | `/api/auth/pair` | Consume a code, return a device bearer token |
+| `GET` | `/api/auth/devices` | List paired devices |
+| `DELETE` | `/api/auth/devices/{id}` | Revoke a device |
 
 ## MCP Server
 
@@ -167,6 +172,7 @@ All settings can be set via environment variables prefixed with `LIFEMAN_`:
 | `LIFEMAN_BACKUP_INTERVAL_HOURS` | `24` | Hours between auto-backups (0 disables) |
 | `LIFEMAN_BACKUP_RETENTION_COUNT` | `14` | Keep the N most-recent encrypted snapshots |
 | `LIFEMAN_BACKUP_DIR` | `<data_dir>/backups` | Where snapshots are written |
+| `LIFEMAN_ALLOW_NETWORK` | `false` | Allow non-loopback peers to reach `/api/*` (with paired-device tokens). UI surface stays loopback-only. |
 
 ## License
 
