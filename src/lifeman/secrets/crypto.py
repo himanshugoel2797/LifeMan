@@ -22,10 +22,24 @@ _KEY_BYTES = 32   # AES-256
 _NONCE_BYTES = 12  # GCM standard
 
 _cached_key: bytes | None = None
+_newly_generated: bool = False
 
 
 def _key_file() -> Path:
     return settings.data_dir / "master.key"
+
+
+def consume_newly_generated_flag() -> bool:
+    """One-shot read of the 'we just generated the master key' signal.
+
+    Returns True at most once per process — used by the lifespan startup
+    hook to surface a one-time output event reminding the user to back up
+    the key file. Subsequent reads return False.
+    """
+    global _newly_generated
+    flag = _newly_generated
+    _newly_generated = False
+    return flag
 
 
 def resolve_master_key() -> bytes:
@@ -73,14 +87,17 @@ def resolve_master_key() -> bytes:
         "Back it up alongside the DB; without it you cannot decrypt secrets.",
         path,
     )
+    global _newly_generated
+    _newly_generated = True
     _cached_key = key
     return key
 
 
 def reset_cache_for_tests() -> None:
     """Tests reset the cached key when they swap data_dir."""
-    global _cached_key
+    global _cached_key, _newly_generated
     _cached_key = None
+    _newly_generated = False
 
 
 def encrypt(value: str) -> tuple[bytes, bytes]:

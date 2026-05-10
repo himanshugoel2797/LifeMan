@@ -50,6 +50,34 @@ async def lifespan(app: FastAPI):
     await scheduler.start()
     log.info("Scheduler started")
 
+    # If the master key was just generated this boot, surface a one-time
+    # output event so the user actually notices (the log warning alone is
+    # easy to miss). Without this key, secrets can't be decrypted; the user
+    # must back it up alongside the DB.
+    from lifeman.secrets.crypto import (
+        consume_newly_generated_flag,
+        resolve_master_key,
+        _key_file,
+    )
+    resolve_master_key()  # ensure the key file exists; harmless if it already did
+    if consume_newly_generated_flag():
+        from lifeman.outputs.api import emit_output
+        try:
+            await emit_output(
+                content=(
+                    "lifeman generated a new master key at "
+                    f"{_key_file()}. Back it up alongside the database — without "
+                    "it, every stored secret becomes unrecoverable."
+                ),
+                category="alert",
+                urgency="urgent",
+                sensitivity="personal",
+                source_tool="lifeman.kernel",
+                reason="first-boot master-key generation; user must back up the key file",
+            )
+        except Exception:
+            log.exception("failed to emit master-key backup reminder output")
+
     # Print connection info
     log.info("=" * 60)
     log.info("lifeman kernel running")
