@@ -49,7 +49,8 @@ async def test_missing_master_key_orphans_existing_secrets(temp_db):
     assert secrets_crypto.consume_newly_generated_flag() is True
 
     # Old ciphertext is now undecryptable — AES-GCM auth tag fails.
-    with pytest.raises(Exception):
+    from cryptography.exceptions import InvalidTag
+    with pytest.raises(InvalidTag):
         await get_secret_value("k", accessor="user", reason="t")
 
 
@@ -105,7 +106,8 @@ async def test_swapped_master_key_cannot_decrypt_old_ciphertext(temp_db):
     key_path.write_bytes(os.urandom(32))
     secrets_crypto.reset_cache_for_tests()
 
-    with pytest.raises(Exception):
+    from cryptography.exceptions import InvalidTag
+    with pytest.raises(InvalidTag):
         await get_secret_value("k", accessor="user", reason="t")
 
 

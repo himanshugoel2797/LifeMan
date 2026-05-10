@@ -346,7 +346,8 @@ async def test_create_schedule_for_unknown_tool_rejected(http_client):
         "when": "1h",
         "reason": "t",
     })
-    assert r.status_code in (400, 404)
+    assert r.status_code == 400
+    assert "ghost_tool" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

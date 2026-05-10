@@ -78,7 +78,8 @@ async def test_tampering_breaks_decryption(temp_db):
     ct[0] ^= 0xFF      # flip a bit in the ciphertext
     await db.execute("UPDATE secrets SET encrypted_value = ? WHERE name = 'api'", (bytes(ct),))
     await db.commit()
-    with pytest.raises(Exception):
+    from cryptography.exceptions import InvalidTag
+    with pytest.raises(InvalidTag):
         await get_secret_value("api", accessor="user", reason="t")
 
 

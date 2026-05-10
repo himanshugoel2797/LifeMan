@@ -85,7 +85,7 @@ async def test_empty_bearer_token_rejected(app_transport):
     transport, _ = app_transport
     async with await _client(transport, {"Authorization": "Bearer "}) as c:
         r = await c.get("/api/system/status")
-    assert r.status_code in (401, 403)
+    assert r.status_code == 401
 
 
 @pytest.mark.asyncio
