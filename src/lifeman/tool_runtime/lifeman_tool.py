@@ -271,6 +271,43 @@ def observe(
     )
 
 
+def secret(name: str, reason: str = "", timeout: float = 120.0) -> str:
+    """Fetch a secret value. Blocks if the user must approve the request.
+
+    Resolution:
+      1. If your tool is in the secret's `allowed_tools` list, returns
+         immediately.
+      2. If your tool holds a standing `secret:read:<name>` permission,
+         returns immediately.
+      3. Otherwise the user is prompted; this call blocks up to `timeout`
+         seconds. If the user denies (or doesn't respond in time) a
+         `LifemanToolError` is raised.
+
+    Returns the decrypted value as a string. Never log the result.
+    """
+    res = _c().call("secret_get", name=name, reason=reason, timeout=timeout)
+    if isinstance(res, dict):
+        if res.get("permission_required"):
+            raise LifemanToolError(
+                f"access to secret {name!r} denied: {res.get('denied_reason', 'no reason')}"
+            )
+        if "error" in res:
+            raise LifemanToolError(res["error"])
+        return res["value"]
+    raise LifemanToolError(f"unexpected secret_get response: {res!r}")
+
+
+def secret_exists(name: str) -> bool:
+    """Check whether a secret with this name exists. Doesn't read the value
+    and doesn't require permission."""
+    return bool(_c().call("secret_has", name=name))
+
+
+def list_secret_names() -> list[dict]:
+    """List secret names + descriptions. Values are never included."""
+    return _c().call("list_secret_names")
+
+
 def ingest_input(
     surface: str,
     raw_payload: str,

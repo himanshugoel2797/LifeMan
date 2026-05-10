@@ -143,6 +143,17 @@ async def _handle_emit_output(args: dict) -> dict:
     return res.model_dump()
 
 
+async def _handle_list_secrets(_: dict) -> dict:
+    """LLM-visible: names + descriptions only. Never values."""
+    from lifeman.secrets import list_secrets
+    items = await list_secrets()
+    return {"secrets": [
+        {"name": s.name, "description": s.description,
+         "allowed_tools": s.allowed_tools, "sensitivity": s.sensitivity}
+        for s in items
+    ]}
+
+
 async def _handle_record_memory(args: dict) -> dict:
     from lifeman.memory import record_memory
 
@@ -611,6 +622,17 @@ SPECS: dict[str, tuple[dict, Callable[[dict], Awaitable[dict]]]] = {
             },
         ),
         _handle_emit_output,
+    ),
+    "list_secrets": (
+        _fn(
+            "list_secrets",
+            "List the names and descriptions of secrets the system holds. "
+            "Values are NEVER returned to chat — only sandboxed tools (after "
+            "user permission) can decrypt them. Use this to know what's "
+            "available when proposing a tool that needs credentials.",
+            {"type": "object", "properties": {}},
+        ),
+        _handle_list_secrets,
     ),
     "record_memory": (
         _fn(

@@ -28,6 +28,10 @@ async def temp_db(tmp_path: Path):
     prev_data_dir = settings.data_dir
     settings.db_path = tmp_path / "test.db"
     settings.data_dir = tmp_path
+    # The secrets module memoises the master key; swapping data_dir means
+    # we want a fresh per-test key in the new location.
+    from lifeman.secrets import crypto as secrets_crypto
+    secrets_crypto.reset_cache_for_tests()
 
     # Reset the cached connection so get_db() opens a fresh one.
     if db_mod._db is not None:
@@ -50,3 +54,4 @@ async def temp_db(tmp_path: Path):
         await db_mod.close_db()
         settings.db_path = prev_path
         settings.data_dir = prev_data_dir
+        secrets_crypto.reset_cache_for_tests()

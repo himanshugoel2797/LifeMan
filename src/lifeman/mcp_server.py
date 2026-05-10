@@ -268,6 +268,17 @@ def observe(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+def list_secrets() -> list[dict]:
+    """List secret names + descriptions. Values are NEVER returned through
+    this surface — only sandboxed tools can read values, and only after
+    user permission."""
+    with _client() as c:
+        r = c.get("/api/secrets")
+        r.raise_for_status()
+        return r.json()
+
+
+@mcp.tool()
 def ingest_input(
     surface: str,
     raw_payload: str,

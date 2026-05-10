@@ -309,6 +309,36 @@ CREATE TABLE IF NOT EXISTS observations (
     archived_at TEXT NOT NULL
 );
 
+-- ---------------------------------------------------------------------------
+-- Secrets (lifeman.secrets) — encrypted at-rest with a master key.
+-- Values are AESGCM-encrypted with a per-secret nonce; only sandboxed tools
+-- (after permission grant) and authenticated user requests can decrypt.
+-- The LLM can list names but never see values.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS secrets (
+    name TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    encrypted_value BLOB NOT NULL,
+    nonce BLOB NOT NULL,
+    allowed_tools_json TEXT NOT NULL DEFAULT '[]',  -- shortcut grant; "*" = any
+    sensitivity TEXT NOT NULL DEFAULT 'private',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_accessed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS secret_access_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    secret_name TEXT NOT NULL,
+    accessor TEXT NOT NULL,        -- tool:foo | user | api
+    accessed_at TEXT NOT NULL,
+    granted INTEGER NOT NULL DEFAULT 0,
+    failure_reason TEXT,
+    reason TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_secret_access_log_secret ON secret_access_log(secret_name, accessed_at);
+
 CREATE INDEX IF NOT EXISTS idx_input_events_emitted ON input_events(emitted_at);
 CREATE INDEX IF NOT EXISTS idx_memory_events_emitted ON memory_events(emitted_at);
 CREATE INDEX IF NOT EXISTS idx_observation_events_emitted ON observation_events(emitted_at);

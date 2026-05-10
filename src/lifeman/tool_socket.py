@@ -313,6 +313,54 @@ class ToolSocket:
             )
             return {"result": res.model_dump()}
 
+        if method == "secret_get":
+            from lifeman.secrets import (
+                SecretAccessDenied,
+                SecretNotFound,
+                get_secret_for_tool,
+            )
+            name = params.get("name")
+            if not name:
+                return {"error": "missing 'name'"}
+            reason = params.get("reason", "")
+            timeout = float(params.get("timeout", 120.0))
+            try:
+                value = await get_secret_for_tool(
+                    self.tool_name, name, reason,
+                    invocation_id=self.invocation_id,
+                    permission_timeout=timeout,
+                )
+            except SecretNotFound:
+                return {"result": {"error": f"secret {name!r} not found"}}
+            except SecretAccessDenied as e:
+                return {"result": {
+                    "permission_required": True,
+                    "capability": f"secret:read:{name}",
+                    "denied_reason": str(e),
+                }}
+            return {"result": {"value": value}}
+
+        if method == "secret_has":
+            # Existence check — never reveals the value, no permission needed.
+            from lifeman.secrets import list_secrets
+            name = params.get("name")
+            if not name:
+                return {"error": "missing 'name'"}
+            for s in await list_secrets():
+                if s.name == name:
+                    return {"result": True}
+            return {"result": False}
+
+        if method == "list_secret_names":
+            # Names + descriptions (not values). Useful for tools that
+            # adapt behaviour based on which secrets are present.
+            from lifeman.secrets import list_secrets
+            return {"result": [
+                {"name": s.name, "description": s.description,
+                 "allowed_tools": s.allowed_tools, "sensitivity": s.sensitivity}
+                for s in await list_secrets()
+            ]}
+
         if method == "audit":
             db = await get_db()
             limit = int(params.get("limit", 20))
