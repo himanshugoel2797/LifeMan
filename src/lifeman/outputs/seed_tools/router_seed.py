@@ -120,7 +120,10 @@ def route(event, channels, state):
 
     out["candidate_channels"] = list(base)
 
-    # Filter: presence + sensitivity + actions capability
+    # Filter: presence + sensitivity + actions capability.
+    # Unknown event sensitivity defaults to strictest (private) and unknown
+    # channel tolerance defaults to weakest (public) so typos fail closed
+    # — matches outputs.registry.OutputChannel.can_deliver.
     sens_rank = {"public": 0, "personal": 1, "private": 2}
     final = []
     for name in base:
@@ -128,8 +131,8 @@ def route(event, channels, state):
         if cm is None:
             out["filtered"][name] = "not installed"
             continue
-        if sens_rank.get(event.get("sensitivity", "personal"), 1) > \
-           sens_rank.get(cm.get("sensitivity_tolerance", "personal"), 1):
+        if sens_rank.get(event.get("sensitivity", "personal"), 2) > \
+           sens_rank.get(cm.get("sensitivity_tolerance", "personal"), 0):
             out["filtered"][name] = "sensitivity exceeds channel tolerance"
             continue
         if event.get("actions") and not cm.get("capabilities", {}).get("actions"):

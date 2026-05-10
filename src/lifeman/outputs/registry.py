@@ -42,9 +42,15 @@ class OutputChannel(abc.ABC):
         capabilities only; channels can override to add availability /
         rate-limit logic.
         """
-        # Sensitivity gate: design §"Privacy leakage through channels"
+        # Sensitivity gate: design §"Privacy leakage through channels".
+        # Unknown event sensitivity → strictest (private) so a typo can't
+        # silently land on a personal channel. Unknown channel tolerance →
+        # weakest (public) so a mis-typed manifest can't silently accept
+        # personal/private content.
         order = {"public": 0, "personal": 1, "private": 2}
-        if order.get(event.sensitivity, 1) > order.get(self.manifest.sensitivity_tolerance, 1):
+        event_level = order.get(event.sensitivity, 2)
+        channel_level = order.get(self.manifest.sensitivity_tolerance, 0)
+        if event_level > channel_level:
             return False, "sensitivity exceeds channel tolerance"
         # Action capability gate
         if event.actions and not self.manifest.capabilities.actions:
