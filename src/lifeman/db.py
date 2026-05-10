@@ -339,6 +339,20 @@ CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
 CREATE INDEX IF NOT EXISTS idx_observations_archived ON observations(archived_at);
 CREATE INDEX IF NOT EXISTS idx_observations_level ON observations(level);
 
+-- ---------------------------------------------------------------------------
+-- Per-tool state KV — small, durable, namespaced by tool name. Tools that
+-- need to remember anything between invocations (caches, run counts,
+-- last-seen markers, scheduling cursors) write here. Values are JSON; the
+-- socket caps payload size so a runaway tool can't bloat the DB.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tool_state (
+    tool_name TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tool_name, key)
+);
+
 CREATE TABLE IF NOT EXISTS build_requests (
     id TEXT PRIMARY KEY,
     description TEXT NOT NULL,

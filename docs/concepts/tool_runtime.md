@@ -31,6 +31,11 @@ imports it as `import lifeman_tool` and calls the methods below.
 | `secret(name)` | Fetch a secret value. Subject to allow-list / standing-grant / prompt resolution. |
 | `secret_exists(name)` | Boolean check; does not read the value, does not log a successful read. |
 | `list_secret_names()` | Names + descriptions only. |
+| `state_get(key, default=None)` | Read a JSON value from this tool's KV. Missing → `default`. |
+| `state_set(key, value, reason)` | Write a JSON value (max 64 KB serialised). Replaces any existing entry. |
+| `state_delete(key, reason)` | Remove a key. |
+| `state_list(prefix=None)` | List `{key, updated_at}` entries; `prefix` is a literal match. |
+| `llm_chat(messages, model, temperature, tools, reason)` | One chat completion against the local LLM. Gated by `llm:invoke` (default-deny, prompts on first use). Returns `{content, tool_calls, finish_reason}`. |
 
 The methods on the socket are implemented in
 [tool_socket.py](src/lifeman/tool_socket.py). Each invocation gets its
@@ -55,6 +60,19 @@ The socket isn't a free pass — many methods do their own gate:
   with `output.` so an arbitrary tool cannot impersonate
   `tool_registered` or `permission_resolved` events. See
   [tool_socket.py:241-255](src/lifeman/tool_socket.py#L241-L255).
+- **`llm_chat`** — `_check_capability("llm:invoke", ...)`: same shape
+  as the invoke check, generalised over arbitrary capability strings.
+  Default-deny; the first call by a given tool prompts the user.
+  Allow-always converts to a standing grant.
+
+## Per-tool state
+
+`state_*` is a small JSON KV namespaced by tool name. Backed by the
+`tool_state` table in the main SQLite database; values are capped at
+64 KB serialised. No permission required within a tool's own
+namespace — a tool cannot read another tool's keys. Use it for
+caches, last-seen markers, run counters, scheduling cursors. For
+larger or structured persistence, write a dedicated storage tool.
 
 ## What is *not* exposed
 

@@ -56,7 +56,14 @@ class ToolSocket:
     async def __aenter__(self) -> "ToolSocket":
         self._tmpdir = Path(tempfile.mkdtemp(prefix="lifeman-tool-"))
         self.socket_path = self._tmpdir / "tool.sock"
-        self._server = await asyncio.start_unix_server(self._handle, str(self.socket_path))
+        # Raise the per-line read limit above the asyncio default (64 KiB).
+        # state_set caps values at 64 KB serialised; a value sent at exactly
+        # the limit plus envelope overhead must still arrive intact so the
+        # cap check can return a clean error rather than the connection
+        # dying at the transport layer.
+        self._server = await asyncio.start_unix_server(
+            self._handle, str(self.socket_path), limit=1024 * 1024,
+        )
         # Make sure the sandbox can actually open the socket regardless of umask.
         os.chmod(self.socket_path, 0o666)
         return self
@@ -365,6 +372,147 @@ class ToolSocket:
                 for s in await list_secrets()
             ]}
 
+        if method == "state_get":
+            key = params.get("key")
+            if not isinstance(key, str) or not key:
+                return {"error": "missing 'key'"}
+            db = await get_db()
+            rows = await db.execute_fetchall(
+                "SELECT value_json FROM tool_state WHERE tool_name = ? AND key = ?",
+                (self.tool_name, key),
+            )
+            if not rows:
+                return {"result": None}
+            try:
+                return {"result": json.loads(rows[0]["value_json"])}
+            except json.JSONDecodeError:
+                return {"error": "stored value is not valid JSON"}
+
+        if method == "state_set":
+            key = params.get("key")
+            if not isinstance(key, str) or not key:
+                return {"error": "missing 'key'"}
+            if "value" not in params:
+                return {"error": "missing 'value'"}
+            try:
+                value_json = json.dumps(params["value"])
+            except (TypeError, ValueError) as e:
+                return {"error": f"value not JSON-serialisable: {e}"}
+            # 64 KB cap per value — keeps the DB lean and forces tools that
+            # want to stash big blobs to use a real storage tool instead.
+            if len(value_json) > 65536:
+                return {"error": "value too large (max 64 KB serialised)"}
+            db = await get_db()
+            now = datetime.now(timezone.utc).isoformat()
+            await db.execute(
+                """INSERT INTO tool_state (tool_name, key, value_json, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(tool_name, key) DO UPDATE SET
+                     value_json = excluded.value_json,
+                     updated_at = excluded.updated_at""",
+                (self.tool_name, key, value_json, now),
+            )
+            await db.commit()
+            return {"result": {"ok": True, "updated_at": now}}
+
+        if method == "state_delete":
+            key = params.get("key")
+            if not isinstance(key, str) or not key:
+                return {"error": "missing 'key'"}
+            db = await get_db()
+            cur = await db.execute(
+                "DELETE FROM tool_state WHERE tool_name = ? AND key = ?",
+                (self.tool_name, key),
+            )
+            await db.commit()
+            return {"result": {"ok": True, "deleted": cur.rowcount or 0}}
+
+        if method == "state_list":
+            db = await get_db()
+            prefix = params.get("prefix")
+            if prefix is not None and not isinstance(prefix, str):
+                return {"error": "'prefix' must be a string"}
+            if prefix:
+                # Escape the LIKE wildcards the caller might have included so
+                # `prefix` is treated as a literal string match, not a pattern.
+                escaped = (
+                    prefix.replace("\\", "\\\\")
+                          .replace("%", "\\%")
+                          .replace("_", "\\_")
+                )
+                rows = await db.execute_fetchall(
+                    "SELECT key, updated_at FROM tool_state "
+                    "WHERE tool_name = ? AND key LIKE ? ESCAPE '\\' ORDER BY key",
+                    (self.tool_name, escaped + "%"),
+                )
+            else:
+                rows = await db.execute_fetchall(
+                    "SELECT key, updated_at FROM tool_state "
+                    "WHERE tool_name = ? ORDER BY key",
+                    (self.tool_name,),
+                )
+            return {"result": [dict(r) for r in rows]}
+
+        if method == "llm_chat":
+            from lifeman.llm import LLMError, merge_tool_call_deltas, stream_chat
+
+            messages = params.get("messages")
+            if not isinstance(messages, list) or not messages:
+                return {"error": "'messages' must be a non-empty list"}
+            tools_spec = params.get("tools")
+            if tools_spec is not None and not isinstance(tools_spec, list):
+                return {"error": "'tools' must be a list of tool specs"}
+            try:
+                temperature = float(params.get("temperature", 0.7))
+            except (TypeError, ValueError):
+                return {"error": "'temperature' must be a number"}
+            model = params.get("model")
+            if model is not None and not isinstance(model, str):
+                return {"error": "'model' must be a string"}
+            reason = params.get("reason", "")
+
+            granted = await self._check_capability(
+                "llm:invoke",
+                {"model": model or "", "message_count": len(messages)},
+                reason,
+            )
+            if not granted:
+                return {"result": {
+                    "permission_required": True,
+                    "capability": "llm:invoke",
+                }}
+
+            content_parts: list[str] = []
+            tool_calls: list[dict] = []
+            finish_reason: str | None = None
+            try:
+                async for delta in stream_chat(
+                    messages,
+                    tools=tools_spec,
+                    model=model,
+                    temperature=temperature,
+                ):
+                    if "content" in delta and delta["content"]:
+                        content_parts.append(delta["content"])
+                    if "tool_calls" in delta and delta["tool_calls"]:
+                        merge_tool_call_deltas(tool_calls, delta["tool_calls"])
+                    if "finish_reason" in delta:
+                        finish_reason = delta["finish_reason"]
+            except LLMError as e:
+                return {"result": {"error": str(e)}}
+
+            await audit.log(
+                source=f"tool:{self.tool_name}",
+                action="llm_chat",
+                target=model or "default",
+                reason=reason,
+            )
+            return {"result": {
+                "content": "".join(content_parts),
+                "tool_calls": tool_calls,
+                "finish_reason": finish_reason,
+            }}
+
         if method == "audit":
             db = await get_db()
             limit = int(params.get("limit", 20))
@@ -376,6 +524,44 @@ class ToolSocket:
             return {"result": [dict(r) for r in rows]}
 
         return {"error": f"unknown method {method!r}"}
+
+    async def _check_capability(
+        self,
+        capability: str,
+        request_scope: dict,
+        reason: str,
+        *,
+        timeout: float = 120.0,
+    ) -> bool:
+        """Generic standing-grant-or-prompt check for an arbitrary capability.
+
+        Used by gates that don't carry the structured `target/args` shape
+        of `invoke:<tool>` (e.g. `llm:invoke`). The flow mirrors
+        `_check_invoke_capability`: look up a matching grant, otherwise
+        open a permission request and block until the user resolves it.
+        """
+        grantee = f"tool:{self.tool_name}"
+        if await find_matching_grant(grantee, capability, request_scope):
+            return True
+        db = await get_db()
+        pid = str(uuid.uuid4())[:12]
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            """INSERT INTO permission_requests
+               (id, requester, capability, scope_json, reason, status, requested_at, invocation_id)
+               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            (pid, grantee, capability, json.dumps(request_scope), reason, now, self.invocation_id),
+        )
+        await db.commit()
+        await bus.publish("permission_requested", {"id": pid, "capability": capability, "from": self.tool_name})
+        await audit.log(
+            source=grantee,
+            action="request_permission",
+            target=capability,
+            reason=reason,
+        )
+        status = await await_permission(pid, timeout=timeout)
+        return status in ("granted_once", "granted_always")
 
     async def _check_invoke_capability(
         self,

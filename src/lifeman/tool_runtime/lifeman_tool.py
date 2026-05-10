@@ -309,6 +309,86 @@ def list_secret_names() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Per-tool state — a small JSON KV store namespaced by your tool name.
+# Use it for caches, last-seen markers, run counters, scheduling cursors.
+# Values must be JSON-serialisable; max 64 KB per value. For larger
+# blobs, write a dedicated storage tool.
+# ---------------------------------------------------------------------------
+
+class _StateMissing:
+    """Sentinel for `state_get(default=...)` to distinguish "missing" from None."""
+    __slots__ = ()
+    def __repr__(self) -> str: return "<state_missing>"
+
+
+_STATE_MISSING = _StateMissing()
+
+
+def state_get(key: str, default: Any = _STATE_MISSING) -> Any:
+    """Read a value from this tool's state. Missing key → `default` if
+    given, else None. (Stored `null` is indistinguishable from missing
+    over the wire — pass `default=` if you need that distinction.)"""
+    res = _c().call("state_get", key=key)
+    if res is None and default is not _STATE_MISSING:
+        return default
+    return res
+
+
+def state_set(key: str, value: Any, reason: str = "") -> dict:
+    """Write a value to this tool's state. Replaces any existing value
+    at the same key. Value must be JSON-serialisable; max 64 KB."""
+    return _c().call("state_set", key=key, value=value, reason=reason)
+
+
+def state_delete(key: str, reason: str = "") -> dict:
+    """Delete a key from this tool's state. Returns `{ok: True, deleted: 0|1}`."""
+    return _c().call("state_delete", key=key, reason=reason)
+
+
+def state_list(prefix: str | None = None) -> list[dict]:
+    """List `{key, updated_at}` entries for this tool. Optional `prefix`
+    is a literal string match (LIKE wildcards are escaped)."""
+    return _c().call("state_list", prefix=prefix)
+
+
+# ---------------------------------------------------------------------------
+# Local LLM access — gated by capability `llm:invoke`. First call in a
+# tool's lifetime prompts the user; allow-always converts to a standing
+# grant. Sync return; the helper accumulates streamed deltas before
+# returning. Don't pass secrets in `messages` — the LLM is local but
+# routed system context still sees them.
+# ---------------------------------------------------------------------------
+
+def llm_chat(
+    messages: list[dict],
+    model: str | None = None,
+    temperature: float = 0.7,
+    tools: list[dict] | None = None,
+    reason: str = "",
+) -> dict:
+    """Run one chat completion against the local LLM.
+
+    `messages` is OpenAI-shaped: `[{role, content}, ...]`. `tools` is
+    OpenAI tool specs (the LLM can request tool calls; you decide
+    whether to honour them by `invoke()`-ing the corresponding tool).
+
+    Returns:
+        `{content, tool_calls, finish_reason}` on success, or
+        `{permission_required: True, capability: "llm:invoke"}` if the
+        user has not granted access. `{error: "..."}` if the LLM server
+        is unreachable or returns a non-2xx.
+    """
+    return _c().call(
+        "llm_chat",
+        messages=messages,
+        model=model,
+        temperature=temperature,
+        tools=tools,
+        reason=reason,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Network policy
 # ---------------------------------------------------------------------------
 
