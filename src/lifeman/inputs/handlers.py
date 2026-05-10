@@ -18,6 +18,8 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+import aiosqlite
+
 from lifeman.db import get_db
 from lifeman.routing.event import HandlerManifest
 from lifeman.routing.handlers import BuiltinHandler, HandlerRegistry, make_discard_handler
@@ -53,17 +55,20 @@ async def _llm_handle(event: dict) -> dict:
             (session_id, now, now),
         )
 
-    seq_row = await db.execute_fetchall(
-        "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM messages WHERE session_id = ?",
-        (session_id,),
-    )
-    seq = int(seq_row[0]["next"])
     msg_id = str(uuid.uuid4())[:12]
-    await db.execute(
-        """INSERT INTO messages (id, session_id, role, content, created_at, seq)
-           VALUES (?, ?, 'user', ?, ?, ?)""",
-        (msg_id, session_id, str(event.get("raw_payload", ""))[:8000], now, seq),
-    )
+    content = str(event.get("raw_payload", ""))[:8000]
+    # Atomic seq computation — see routes/chat.py:_append_message for the
+    # concurrent-appender race this guards against.
+    insert_sql = """
+        INSERT INTO messages (id, session_id, role, content, created_at, seq)
+        SELECT ?, ?, 'user', ?, ?,
+               COALESCE((SELECT MAX(seq) FROM messages WHERE session_id = ?), 0) + 1
+    """
+    insert_args = (msg_id, session_id, content, now, session_id)
+    try:
+        await db.execute(insert_sql, insert_args)
+    except aiosqlite.IntegrityError:
+        await db.execute(insert_sql, insert_args)
     await db.execute(
         "UPDATE sessions SET last_message_at = ?, message_count = message_count + 1 "
         "WHERE id = ?",

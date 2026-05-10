@@ -19,6 +19,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
@@ -301,29 +302,32 @@ async def _append_message(
     tool_calls: list[dict] | None = None,
     tool_call_id: str | None = None,
 ) -> str:
+    """Insert a chat message with the next per-session seq atomically.
+
+    The seq is computed inside the INSERT (`COALESCE(MAX(seq), 0) + 1` from a
+    correlated SELECT) instead of a read-then-insert pair, so a concurrent
+    appender to the same session can't observe the same MAX(seq) and produce
+    duplicates. The `uq_messages_session_seq` UNIQUE INDEX is the
+    defence-in-depth backstop; we retry once on the unlikely conflict.
+    """
     db = await get_db()
     mid = str(uuid.uuid4())[:12]
     now = datetime.now(timezone.utc).isoformat()
-    rows = await db.execute_fetchall(
-        "SELECT COALESCE(MAX(seq), 0) AS s FROM messages WHERE session_id = ?",
-        (session_id,),
+    tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+    insert_sql = """
+        INSERT INTO messages
+          (id, session_id, role, content, tool_calls_json, tool_call_id, created_at, seq)
+        SELECT ?, ?, ?, ?, ?, ?, ?,
+               COALESCE((SELECT MAX(seq) FROM messages WHERE session_id = ?), 0) + 1
+    """
+    insert_args = (
+        mid, session_id, role, content, tool_calls_json, tool_call_id, now, session_id,
     )
-    seq = (rows[0]["s"] if rows else 0) + 1
-    await db.execute(
-        """INSERT INTO messages
-           (id, session_id, role, content, tool_calls_json, tool_call_id, created_at, seq)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            mid,
-            session_id,
-            role,
-            content,
-            json.dumps(tool_calls) if tool_calls else None,
-            tool_call_id,
-            now,
-            seq,
-        ),
-    )
+    try:
+        await db.execute(insert_sql, insert_args)
+    except aiosqlite.IntegrityError:
+        # Lost the seq race against another appender — try once more.
+        await db.execute(insert_sql, insert_args)
     await db.execute(
         "UPDATE sessions SET last_message_at = ?, message_count = message_count + 1 WHERE id = ?",
         (now, session_id),

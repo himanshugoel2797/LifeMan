@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 import aiosqlite
 from pathlib import Path
 
 from lifeman.config import settings
+
+log = logging.getLogger("lifeman.db")
 
 _db: aiosqlite.Connection | None = None
 
@@ -417,6 +421,23 @@ async def get_db() -> aiosqlite.Connection:
         await _migrate("sessions", _SESSION_COLUMN_ADDS)
         await _migrate("invocations", _INVOCATION_COLUMN_ADDS)
         await _migrate("permission_requests", _PERMISSION_REQUEST_COLUMN_ADDS)
+
+        # Guards the chat-appender seq race. Created here (not in SCHEMA) so
+        # an upgrade with pre-existing duplicates from earlier seq-race fires
+        # does not fail startup — the UNIQUE constraint is defence-in-depth
+        # for the application-level atomic INSERT…SELECT pattern.
+        try:
+            await _db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_messages_session_seq ON messages(session_id, seq)"
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "could not create uq_messages_session_seq (likely pre-existing "
+                "duplicates from earlier seq race); leaving non-unique index in "
+                "place. Reason: %s", e,
+            )
+
         await _db.commit()
     return _db
 
