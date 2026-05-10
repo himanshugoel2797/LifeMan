@@ -145,18 +145,39 @@ WORKSPACE_INSTRUCTIONS = dedent(
 )
 
 
+_DETAILED_TOOL_LIMIT = 20  # Above this, the long tail collapses to one-liners.
+
+
 async def render_claude_md() -> str:
-    """Build a fresh CLAUDE.md describing the live state of the registry."""
+    """Build a fresh CLAUDE.md describing the live state of the registry.
+
+    Up to `_DETAILED_TOOL_LIMIT` tools are rendered in full (manifest + both
+    schemas + recent invocations). The rest collapse to a single-line
+    summary so a registry of 50+ tools doesn't blow up the prompt every
+    turn. The most-recently-used tools are picked for the detailed slot
+    so Claude sees what's actually in active use.
+    """
     db = await get_db()
 
+    # Pick the most-recently-active tools for detailed rendering. LEFT JOIN
+    # so tools with no invocations still sort in (under their name) below
+    # ones with recent activity.
     rows = await db.execute_fetchall(
-        "SELECT id, name, description, category FROM tools "
-        "WHERE deprecated_at IS NULL ORDER BY name"
+        """SELECT t.id, t.name, t.description, t.category,
+                  MAX(i.started_at) AS last_used
+             FROM tools t
+             LEFT JOIN invocations i ON i.tool = t.name
+            WHERE t.deprecated_at IS NULL
+            GROUP BY t.id
+            ORDER BY last_used DESC NULLS LAST, t.name"""
     )
+    rows = [dict(r) for r in rows]
+
+    detailed = rows[:_DETAILED_TOOL_LIMIT]
+    tail = rows[_DETAILED_TOOL_LIMIT:]
 
     tool_blocks: list[str] = []
-    for r in rows:
-        r = dict(r)
+    for r in detailed:
         manifest_rows = await db.execute_fetchall(
             "SELECT manifest_json, schema_input_json, schema_output_json "
             "FROM tool_manifests WHERE tool_id = ? ORDER BY version DESC LIMIT 1",
@@ -208,6 +229,18 @@ async def render_claude_md() -> str:
             "## Installed tools\n\n"
             "_No tools installed yet. You are bootstrapping the registry — pick a tool "
             "the user asks for and build it._\n"
+        )
+
+    if tail:
+        tail_lines = [
+            f"- `{t['name']}` ({t['category']}) — {t['description']}"
+            for t in tail
+        ]
+        installed_section += (
+            f"\n### Other installed tools ({len(tail)} more)\n\n"
+            "_Listed in compact form — ask for full manifest/schemas if you "
+            "need to call or modify them._\n\n"
+            + "\n".join(tail_lines) + "\n"
         )
 
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
