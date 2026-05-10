@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% set active_page = "system" %}
+
+{% block title %}lifeman — System{% endblock %}
+
+{% block content %}
+<h1>System</h1>
+
+<h2>LLM usage</h2>
+<p class="reason">Token counts captured from every chat turn and router LLM fallback.</p>
+
+{% set _life_totals = namespace(calls=0, prompt=0, completion=0, total=0) %}
+{% for r in lifetime_usage %}
+    {% set _life_totals.calls = _life_totals.calls + r.calls %}
+    {% set _life_totals.prompt = _life_totals.prompt + r.prompt_tokens %}
+    {% set _life_totals.completion = _life_totals.completion + r.completion_tokens %}
+    {% set _life_totals.total = _life_totals.total + r.total_tokens %}
+{% endfor %}
+{% set _24_totals = namespace(calls=0, prompt=0, completion=0, total=0) %}
+{% for r in last24h_usage %}
+    {% set _24_totals.calls = _24_totals.calls + r.calls %}
+    {% set _24_totals.prompt = _24_totals.prompt + r.prompt_tokens %}
+    {% set _24_totals.completion = _24_totals.completion + r.completion_tokens %}
+    {% set _24_totals.total = _24_totals.total + r.total_tokens %}
+{% endfor %}
+
+<div class="stat-grid">
+    <div class="stat">
+        <div class="stat-value">{{ _24_totals.calls }}</div>
+        <div class="stat-label">Calls (24h)</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ '{:,}'.format(_24_totals.total) }}</div>
+        <div class="stat-label">Tokens (24h)</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ '{:,}'.format(_life_totals.total) }}</div>
+        <div class="stat-label">Tokens (lifetime)</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ _life_totals.calls }}</div>
+        <div class="stat-label">Calls (lifetime)</div>
+    </div>
+</div>
+
+<h2>By surface</h2>
+{% if lifetime_usage %}
+<table>
+    <thead><tr><th>Surface</th><th>Calls (24h)</th><th>Tokens (24h)</th><th>Calls (lifetime)</th><th>Tokens (lifetime)</th></tr></thead>
+    <tbody>
+        {% set _24_map = {} %}
+        {% for r in last24h_usage %}{% set _ = _24_map.update({r.surface: r}) %}{% endfor %}
+        {% for r in lifetime_usage %}
+        <tr>
+            <td><span class="tag">{{ r.surface }}</span></td>
+            <td>{{ _24_map.get(r.surface, {}).get('calls', 0) }}</td>
+            <td>{{ '{:,}'.format(_24_map.get(r.surface, {}).get('total_tokens', 0)) }}</td>
+            <td>{{ r.calls }}</td>
+            <td>{{ '{:,}'.format(r.total_tokens) }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No LLM usage recorded yet. (Have a live-chat turn or trigger an unmatched-route LLM fallback.)</div>
+{% endif %}
+
+<details class="disclose">
+    <summary>Recent calls ({{ recent_usage|length }})</summary>
+    {% if recent_usage %}
+    <table>
+        <thead><tr><th>When</th><th>Surface</th><th>Model</th><th>Prompt</th><th>Completion</th><th>Total</th><th>Latency</th></tr></thead>
+        <tbody>
+            {% for r in recent_usage %}
+            <tr>
+                <td class="timestamp">{{ r.created_at[:19] }}</td>
+                <td><span class="tag">{{ r.surface }}</span></td>
+                <td>{{ r.model or '—' }}</td>
+                <td>{{ r.prompt_tokens }}</td>
+                <td>{{ r.completion_tokens }}</td>
+                <td>{{ r.total_tokens }}</td>
+                <td>{{ (r.latency_ms ~ 'ms') if r.latency_ms is not none else '—' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No calls yet.</div>
+    {% endif %}
+</details>
+
+<h2>Backups</h2>
+<p class="reason">
+    Encrypted SQLite snapshots ({{ backup_settings.backup_dir }}).
+    {% if backup_settings.enabled and backup_settings.interval_hours > 0 %}
+        Auto: every {{ backup_settings.interval_hours }}h, keeping {{ backup_settings.retention_count }}.
+    {% else %}
+        Auto-backup is disabled.
+    {% endif %}
+    Master key is required for restore — back it up separately.
+</p>
+
+<div class="btn-group" style="margin-bottom: 16px;">
+    <button type="button" id="backup-create-btn" class="btn btn-success">Create backup now</button>
+</div>
+
+{% if backups %}
+<table>
+    <thead><tr><th>Created</th><th>Name</th><th>Size</th><th>Actions</th></tr></thead>
+    <tbody>
+        {% for b in backups %}
+        <tr>
+            <td class="timestamp">{{ b.created_at[:19] }}</td>
+            <td><code>{{ b.name }}</code></td>
+            <td>{{ '{:,}'.format(b.size_bytes) }} B</td>
+            <td>
+                <button class="btn btn-danger" data-action="restore" data-name="{{ b.name }}">Restore</button>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No backups yet. Click "Create backup now" to take one.</div>
+{% endif %}
+
+<script>
+document.getElementById('backup-create-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('backup-create-btn');
+    btn.disabled = true;
+    btn.textContent = 'Creating…';
+    try {
+        const r = await window.lifemanFetch('/api/system/backups', { method: 'POST' });
+        if (!r.ok) {
+            const t = await r.text();
+            window.toast('Backup failed: ' + t.slice(0, 200), 'err');
+            return;
+        }
+        const body = await r.json();
+        window.toast('Backup created: ' + body.name, 'ok');
+        setTimeout(() => location.reload(), 600);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Create backup now';
+    }
+});
+
+document.querySelectorAll('button[data-action="restore"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+        const name = btn.dataset.name;
+        const ok = confirm(
+            'Restore ' + name + '?\n\n' +
+            'This OVERWRITES the live database. The current DB will be ' +
+            'kept at data.db.pre-restore for one rollback, but any newer ' +
+            'data not in this snapshot will be lost.'
+        );
+        if (!ok) return;
+        const r = await window.lifemanFetch('/api/system/backups/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, confirm: true }),
+        });
+        if (!r.ok) {
+            const t = await r.text();
+            window.toast('Restore failed: ' + t.slice(0, 200), 'err');
+            return;
+        }
+        window.toast('Restored from ' + name + '. Reload to refresh views.', 'ok');
+    });
+});
+</script>
+{% endblock %}

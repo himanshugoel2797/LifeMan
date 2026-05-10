@@ -27,3 +27,4 @@ calls back into the same `/api/...` endpoints documented in the
 | `/outputs` and `/outputs/{id}` | [Outputs](outputs.md) |
 | `/build-requests` | [Build requests](build_requests.md) |
 | `/audit` | [Audit log](audit.md) |
+| `/system` | [System](system.md) |

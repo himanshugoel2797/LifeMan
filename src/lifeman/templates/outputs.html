@@ -161,6 +161,35 @@
 <div class="empty">No output channels installed.</div>
 {% endif %}
 
+<h2>Rule proposals</h2>
+<p class="reason">LLM-fallback channel picks for unmatched events. Promote a proposal into a real rule, or dismiss it.</p>
+{% if proposals %}
+<table>
+    <thead><tr><th>Category</th><th>Urgency</th><th>LLM-picked channels</th><th>Hits</th><th>Last seen</th><th></th></tr></thead>
+    <tbody>
+        {% for p in proposals %}
+        <tr id="proposal-{{ p.id }}">
+            <td><span class="tag">{{ p.category }}</span></td>
+            <td><span class="tag">{{ p.urgency }}</span></td>
+            <td>
+                {% for c in p.channels %}<span class="tag tag-accent">{{ c }}</span> {% endfor %}
+            </td>
+            <td>{{ p.hit_count }}</td>
+            <td class="timestamp">{{ p.last_seen_at[:19] }}</td>
+            <td>
+                <div class="btn-group">
+                    <button class="btn btn-success" data-action="accept-proposal" data-id="{{ p.id }}">Accept</button>
+                    <button class="btn btn-danger" data-action="dismiss-proposal" data-id="{{ p.id }}">Dismiss</button>
+                </div>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No pending proposals. (LLM fallback either matched existing rules or didn't run.)</div>
+{% endif %}
+
 <h2>Routing rules</h2>
 {% if rules %}
 <table>
@@ -221,6 +250,37 @@ document.querySelectorAll('button[data-action="cancel"]').forEach((btn) => {
         );
         if (!r.ok) { window.toast('Cancel failed', 'err'); return; }
         location.reload();
+    });
+});
+
+document.querySelectorAll('button[data-action="accept-proposal"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        if (!confirm('Promote this proposal into a routing rule?')) return;
+        const r = await window.lifemanFetch(
+            '/api/outputs/rule-proposals/' + id + '/accept',
+            { method: 'POST' },
+        );
+        if (!r.ok) {
+            const t = await r.text();
+            window.toast('Accept failed: ' + t.slice(0, 200), 'err');
+            return;
+        }
+        window.toast('Promoted to rule', 'ok');
+        setTimeout(() => location.reload(), 400);
+    });
+});
+
+document.querySelectorAll('button[data-action="dismiss-proposal"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        const r = await window.lifemanFetch(
+            '/api/outputs/rule-proposals/' + id,
+            { method: 'DELETE' },
+        );
+        if (!r.ok) { window.toast('Dismiss failed', 'err'); return; }
+        document.getElementById('proposal-' + id)?.remove();
+        window.toast('Dismissed', 'ok');
     });
 });
 </script>

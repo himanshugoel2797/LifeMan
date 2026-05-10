@@ -56,6 +56,24 @@ discovered via the routing engine. Columns:
 - **Actions?** — yes / no, whether the channel can render
   user-clickable actions and report responses back.
 
+### Rule proposals
+
+When the router doesn't find a rule for an emitted event, it falls
+back to the local LLM to pick channels — and caches that pick as a
+proposal in `output_rule_proposals`. The table here shows pending
+proposals (not yet accepted or dismissed), sorted by hit count.
+
+- **Accept** — promotes the proposal into an
+  `output_routing_rules` row at position 100 (between the default
+  category rules and the state-override block), so subsequent events
+  with the same `(category, urgency)` skip the LLM and use this
+  static rule.
+- **Dismiss** — marks the row dismissed. The next LLM pick on the
+  same combo will create a fresh proposal; this is the right action
+  when the LLM's suggestion was wrong.
+
+Powered by `GET/POST/DELETE /api/outputs/rule-proposals[/{id}]`.
+
 ### Routing rules
 
 Reads `output_routing_rules`, which the in-process router seeds with
@@ -65,9 +83,9 @@ sensible defaults the first time it runs. Columns:
 - **Channels** — the rule's preferred channel list.
 - **Notes** — author comment.
 
-This view is read-only — to change rules, currently you write to the
-table directly or install a tool with `role: output_router` that
-supplies a different policy.
+Mostly read-only — change rules by accepting a proposal (above),
+writing the table directly, or installing a tool with
+`role: output_router`.
 
 ## Detail page (`/outputs/{id}`)
 

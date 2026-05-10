@@ -410,6 +410,21 @@ async def outputs_page(request: Request):
     channels = [c.manifest.model_dump() for c in registry.all()]
     rules = [r.model_dump() for r in await load_rules()]
 
+    proposal_rows = await db.execute_fetchall(
+        "SELECT id, category, urgency, channels_json, hit_count, "
+        "first_seen_at, last_seen_at FROM output_rule_proposals "
+        "WHERE accepted_at IS NULL AND dismissed_at IS NULL "
+        "ORDER BY hit_count DESC, last_seen_at DESC LIMIT 50"
+    )
+    proposals = []
+    for r in proposal_rows:
+        r = dict(r)
+        try:
+            r["channels"] = json.loads(r["channels_json"])
+        except json.JSONDecodeError:
+            r["channels"] = []
+        proposals.append(r)
+
     # Digest queue: events routed to the digest accumulator that haven't been
     # cancelled. Until a morning-brief tool drains the queue, this panel is
     # the only way to see what the router silenced.
@@ -434,7 +449,10 @@ async def outputs_page(request: Request):
     return templates.TemplateResponse(
         request,
         "outputs.html",
-        {"items": items, "channels": channels, "rules": rules, "digest": digest},
+        {
+            "items": items, "channels": channels, "rules": rules,
+            "digest": digest, "proposals": proposals,
+        },
     )
 
 
@@ -501,6 +519,59 @@ async def output_detail_page(request: Request, output_id: str):
                 }
                 for a in audit_rows
             ],
+        },
+    )
+
+
+@router.get("/system", response_class=HTMLResponse)
+async def system_page(request: Request):
+    """Backups + LLM usage. Read-only summary; mutations go through /api."""
+    from datetime import datetime, timedelta, timezone
+
+    from lifeman.backup import list_backups
+    from lifeman.config import settings as _settings
+
+    db = await get_db()
+
+    # Per-surface usage totals (lifetime + 24h).
+    day_ago = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    lifetime = await db.execute_fetchall(
+        "SELECT surface, COUNT(*) AS calls, "
+        "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+        "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
+        "COALESCE(SUM(total_tokens), 0) AS total_tokens "
+        "FROM llm_usage GROUP BY surface ORDER BY total_tokens DESC"
+    )
+    last24h = await db.execute_fetchall(
+        "SELECT surface, COUNT(*) AS calls, "
+        "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+        "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
+        "COALESCE(SUM(total_tokens), 0) AS total_tokens "
+        "FROM llm_usage WHERE created_at > ? GROUP BY surface "
+        "ORDER BY total_tokens DESC",
+        (day_ago,),
+    )
+    recent = await db.execute_fetchall(
+        "SELECT surface, session_id, model, prompt_tokens, completion_tokens, "
+        "total_tokens, latency_ms, created_at FROM llm_usage "
+        "ORDER BY id DESC LIMIT 25"
+    )
+
+    backups = list_backups()
+    return templates.TemplateResponse(
+        request,
+        "system.html",
+        {
+            "backups": [b.__dict__ for b in backups],
+            "lifetime_usage": [dict(r) for r in lifetime],
+            "last24h_usage": [dict(r) for r in last24h],
+            "recent_usage": [dict(r) for r in recent],
+            "backup_settings": {
+                "enabled": _settings.backup_enabled,
+                "interval_hours": _settings.backup_interval_hours,
+                "retention_count": _settings.backup_retention_count,
+                "backup_dir": str(_settings.get_backup_dir()),
+            },
         },
     )
 
