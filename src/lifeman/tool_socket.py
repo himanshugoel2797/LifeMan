@@ -129,7 +129,11 @@ class ToolSocket:
             target = params.get("tool")
             if not target:
                 return {"error": "missing 'tool'"}
-            granted = await self._check_invoke_capability(target, params.get("reason", ""))
+            granted = await self._check_invoke_capability(
+                target,
+                params.get("args") or {},
+                params.get("reason", ""),
+            )
             if not granted:
                 return {"result": {
                     "permission_required": True,
@@ -373,25 +377,36 @@ class ToolSocket:
 
         return {"error": f"unknown method {method!r}"}
 
-    async def _check_invoke_capability(self, target: str, reason: str) -> bool:
+    async def _check_invoke_capability(
+        self,
+        target: str,
+        args: dict,
+        reason: str,
+    ) -> bool:
         """Tools must hold `invoke:<target>` to invoke another tool.
 
         Honours scope (args_match, expires_at) via find_matching_grant so a
         narrowly-scoped grant doesn't accidentally cover a broader request.
+        The request scope carries the actual `args` so grants like
+        `args_match: {dry_run: true}` are checked against the real call.
         """
         db = await get_db()
         cap = f"invoke:{target}"
         grantee = f"tool:{self.tool_name}"
-        if await find_matching_grant(grantee, cap, {"target": target}):
+        request_scope = {"target": target, "args": args if isinstance(args, dict) else {}}
+        if await find_matching_grant(grantee, cap, request_scope):
             return True
-        # No standing grant — request one and wait for the user.
+        # No standing grant — request one and wait for the user. Persist the
+        # actual args alongside the target so the resolve UI can see what's
+        # being granted and offer to scope the grant to those args.
         pid = str(uuid.uuid4())[:12]
         now = datetime.now(timezone.utc).isoformat()
+        scope_json = json.dumps(request_scope)
         await db.execute(
             """INSERT INTO permission_requests
                (id, requester, capability, scope_json, reason, status, requested_at, invocation_id)
-               VALUES (?, ?, ?, '{}', ?, 'pending', ?, ?)""",
-            (pid, grantee, cap, reason, now, self.invocation_id),
+               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            (pid, grantee, cap, scope_json, reason, now, self.invocation_id),
         )
         await db.commit()
         await bus.publish("permission_requested", {"id": pid, "capability": cap, "from": self.tool_name})
