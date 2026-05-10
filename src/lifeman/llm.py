@@ -92,8 +92,8 @@ def merge_tool_call_deltas(
             slot["type"] = frag["type"]
         fn_frag = frag.get("function") or {}
         fn = slot["function"]
-        if fn_frag.get("name"):
-            fn["name"] = fn["name"] + fn_frag["name"] if fn["name"] and fn_frag["name"] != fn["name"] else fn_frag["name"]
+        if "name" in fn_frag and fn_frag["name"] is not None:
+            fn["name"] = (fn["name"] or "") + fn_frag["name"]
         if "arguments" in fn_frag and fn_frag["arguments"] is not None:
             fn["arguments"] = (fn["arguments"] or "") + fn_frag["arguments"]
     return accum

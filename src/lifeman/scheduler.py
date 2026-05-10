@@ -55,6 +55,9 @@ async def _loop() -> None:
         await asyncio.sleep(5)
 
 
+_in_flight: set[str] = set()
+
+
 async def _tick() -> None:
     db = await get_db()
     now = datetime.now(timezone.utc).isoformat()
@@ -62,9 +65,24 @@ async def _tick() -> None:
         "SELECT * FROM schedules WHERE fires_at <= ? AND cancelled_at IS NULL",
         (now,),
     )
+    coros = []
     for row in rows:
         row = dict(row)
-        await _fire(row)
+        sid = row["id"]
+        if sid in _in_flight:
+            # Already running from a prior tick — don't re-fire.
+            continue
+        _in_flight.add(sid)
+        coros.append(_fire_and_release(row))
+    if coros:
+        await asyncio.gather(*coros, return_exceptions=True)
+
+
+async def _fire_and_release(schedule: dict) -> None:
+    try:
+        await _fire(schedule)
+    finally:
+        _in_flight.discard(schedule["id"])
 
 
 async def _fire(schedule: dict) -> None:
@@ -75,6 +93,20 @@ async def _fire(schedule: dict) -> None:
     tool_name = schedule["tool"]
     args = json.loads(schedule["args_json"])
     schedule_id = schedule["id"]
+
+    # Reserve the row by advancing fires_at into the future *before* the tool
+    # runs. This protects against re-selection in the next tick if the tool
+    # outruns the tick interval, and against multi-process scheduling.
+    when_spec = schedule["when_spec"]
+    next_fire = _compute_next_fire(when_spec)
+    reserved_until = next_fire or (
+        datetime.now(timezone.utc) + timedelta(hours=1)
+    ).isoformat()
+    await db.execute(
+        "UPDATE schedules SET fires_at = ? WHERE id = ?",
+        (reserved_until, schedule_id),
+    )
+    await db.commit()
 
     log.info("Firing schedule %s for tool %s", schedule_id, tool_name)
     await audit.log(
@@ -95,11 +127,8 @@ async def _fire(schedule: dict) -> None:
     if isinstance(result, dict) and result.get("no_op"):
         no_ops = schedule["consecutive_no_ops"] + 1
 
-    when_spec = schedule["when_spec"]
-    next_fire = _compute_next_fire(when_spec)
-
     if next_fire:
-        # Recurring: update fires_at
+        # Recurring: lock in the previously-reserved next_fire as authoritative.
         await db.execute(
             """UPDATE schedules
                SET last_fired = ?, fires_at = ?, total_fires = ?, consecutive_no_ops = ?
@@ -118,7 +147,12 @@ async def _fire(schedule: dict) -> None:
 
 
 def _compute_next_fire(when_spec: str) -> str | None:
-    """Compute next fire time for recurring schedules. Returns None for one-shot."""
+    """Compute next fire time for recurring schedules. Returns None for one-shot.
+
+    Mental model: "the next occurrence of HH:MM after now". Daily 23:00 fired
+    at 01:00 should pick today 23:00, not tomorrow's. Hourly :15 at 12:30
+    should pick 13:15.
+    """
     try:
         spec = json.loads(when_spec) if isinstance(when_spec, str) and when_spec.startswith("{") else None
     except json.JSONDecodeError:
@@ -136,18 +170,20 @@ def _compute_next_fire(when_spec: str) -> str | None:
     hour, minute = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
 
     if recur == "hourly":
-        next_dt = now + timedelta(hours=1)
-        next_dt = next_dt.replace(minute=minute, second=0, microsecond=0)
-    elif recur == "daily":
-        next_dt = now + timedelta(days=1)
-        next_dt = next_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        candidate = now.replace(minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(hours=1)
+        next_dt = candidate
     elif recur == "weekly":
-        next_dt = now + timedelta(weeks=1)
-        next_dt = next_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    else:
-        # Default: daily
-        next_dt = now + timedelta(days=1)
-        next_dt = next_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(weeks=1)
+        next_dt = candidate
+    else:  # daily and unknown -> daily
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        next_dt = candidate
 
     return next_dt.isoformat()
 
