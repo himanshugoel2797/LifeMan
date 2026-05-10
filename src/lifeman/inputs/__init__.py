@@ -92,14 +92,11 @@ async def ingest_input(
     )
     await db.commit()
 
-    decision = await engine.decide(event, state={})
-    await engine.persist_audit(decision)
+    decision, ok, dropped = await engine.run_event(event)
     if decision.expired:
         await audit.log(source=source or "system", action="ingest_input_expired",
                         target=event_id, reason=reason)
         return IngestInputResponse(event_id=event_id, expired=True)
-
-    ok, dropped = await engine.dispatch_all(event, decision)
     await audit.log(
         source=source or "system",
         action="ingest_input",

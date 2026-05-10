@@ -392,6 +392,21 @@ def llm_chat(
 # Network policy
 # ---------------------------------------------------------------------------
 
+def network_mode() -> str | None:
+    """Return the declared network mode: "unrestricted", "local_only", or None."""
+    return os.environ.get("LIFEMAN_NETWORK_MODE") or None
+
+
+def fire_id() -> str | None:
+    """Return the scheduler's per-fire id when this invocation was scheduler-fired.
+
+    Use as a dedup key for external side effects: persist `(fire_id, action)`
+    in `state_set` and skip on replay. None means this invocation didn't come
+    from a scheduled fire (chat tool call, direct API invoke, etc.).
+    """
+    return os.environ.get("LIFEMAN_FIRE_ID") or None
+
+
 def network_hosts() -> list[str]:
     """Return the host allowlist this tool declared in `manifest.network`.
 

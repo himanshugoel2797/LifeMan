@@ -32,6 +32,26 @@ _SANDBOX_GID = 65534
 _seccomp_warning_logged = False
 
 
+def _classify_network(network_hosts: list[str] | None) -> tuple[str | None, list[str]]:
+    """Split a `manifest.network` list into (mode, host_allowlist).
+
+    `@unrestricted` and `@local` are mode tokens; everything else is a host
+    allowlist entry. The strongest mode wins (`@unrestricted` > `@local`).
+    """
+    if not network_hosts:
+        return None, []
+    mode: str | None = None
+    hosts: list[str] = []
+    for entry in network_hosts:
+        if entry == "@unrestricted":
+            mode = "unrestricted"
+        elif entry == "@local" and mode != "unrestricted":
+            mode = "local_only"
+        elif entry and not entry.startswith("@"):
+            hosts.append(entry)
+    return mode, hosts
+
+
 def _build_seccomp_filter() -> bytes | None:
     """Return a serialised BPF seccomp filter, or None if unavailable.
 
@@ -96,6 +116,7 @@ async def run_tool(
     timeout: float = 30.0,
     socket_path: str | None = None,
     network_hosts: list[str] | None = None,
+    fire_id: str | None = None,
 ) -> dict:
     """Run a tool in a bubblewrap sandbox (or directly if sandbox disabled).
 
@@ -104,20 +125,18 @@ async def run_tool(
     `_execute_tool` — owns the socket lifecycle.
 
     `network_hosts` — if non-empty, give the tool access to the host's
-    network namespace and expose the declared allowlist via the
-    `LIFEMAN_NETWORK_HOSTS` env var. When None or empty, the network
-    namespace is unshared and the tool has no network. Allowlist
-    enforcement at the syscall level is future work (egress proxy);
-    for now the manifest declaration is the contract and exposing the
-    list to tool-side code lets responsible tools self-restrict.
+    network namespace. Special tokens `@unrestricted` and `@local` set
+    `LIFEMAN_NETWORK_MODE` (the latter is advisory until an egress proxy
+    is wired in); other entries are exposed via `LIFEMAN_NETWORK_HOSTS`
+    so responsible tools can self-restrict. Empty/None = no network.
     """
     input_json = json.dumps(args)
     network_hosts = network_hosts or []
 
     if not settings.sandbox_enabled or not shutil.which(settings.bwrap_path):
-        return await _run_direct(tool_dir, input_json, timeout, socket_path, network_hosts)
+        return await _run_direct(tool_dir, input_json, timeout, socket_path, network_hosts, fire_id)
 
-    return await _run_sandboxed(tool_dir, input_json, timeout, socket_path, network_hosts)
+    return await _run_sandboxed(tool_dir, input_json, timeout, socket_path, network_hosts, fire_id)
 
 
 async def _run_direct(
@@ -126,6 +145,7 @@ async def _run_direct(
     timeout: float,
     socket_path: str | None,
     network_hosts: list[str] | None = None,
+    fire_id: str | None = None,
 ) -> dict:
     """Run tool directly without sandbox (development mode)."""
     env = os.environ.copy()
@@ -133,8 +153,13 @@ async def _run_direct(
     env["PYTHONPATH"] = f"{runtime}:{env.get('PYTHONPATH', '')}".rstrip(":")
     if socket_path:
         env["LIFEMAN_TOOL_SOCKET"] = socket_path
-    if network_hosts:
-        env["LIFEMAN_NETWORK_HOSTS"] = ",".join(network_hosts)
+    mode, hosts = _classify_network(network_hosts)
+    if mode:
+        env["LIFEMAN_NETWORK_MODE"] = mode
+    if hosts:
+        env["LIFEMAN_NETWORK_HOSTS"] = ",".join(hosts)
+    if fire_id:
+        env["LIFEMAN_FIRE_ID"] = fire_id
     proc = await asyncio.create_subprocess_exec(
         "python3", str(tool_dir / "run.py"),
         stdin=asyncio.subprocess.PIPE,
@@ -168,6 +193,7 @@ async def _run_sandboxed(
     timeout: float,
     socket_path: str | None,
     network_hosts: list[str] | None = None,
+    fire_id: str | None = None,
 ) -> dict:
     """Run tool inside bubblewrap sandbox."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -189,6 +215,7 @@ async def _run_sandboxed(
             cmd = _build_bwrap_cmd(
                 tool_dir, Path(tmpdir), socket_path, seccomp_fd,
                 network_hosts=network_hosts,
+                fire_id=fire_id,
             )
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -229,6 +256,7 @@ def _build_bwrap_cmd(
     seccomp_fd: int = -1,
     *,
     network_hosts: list[str] | None = None,
+    fire_id: str | None = None,
 ) -> list[str]:
     """Build the bubblewrap command with layered isolation."""
     bwrap = settings.bwrap_path
@@ -343,9 +371,13 @@ def _build_bwrap_cmd(
         for ca_path in ("/etc/ssl", "/etc/pki", "/etc/ca-certificates"):
             if Path(ca_path).exists():
                 cmd += ["--ro-bind", ca_path, ca_path]
-        cmd += [
-            "--setenv", "LIFEMAN_NETWORK_HOSTS", ",".join(network_hosts),
-        ]
+        mode, hosts = _classify_network(network_hosts)
+        if mode:
+            cmd += ["--setenv", "LIFEMAN_NETWORK_MODE", mode]
+        if hosts:
+            cmd += ["--setenv", "LIFEMAN_NETWORK_HOSTS", ",".join(hosts)]
+    if fire_id:
+        cmd += ["--setenv", "LIFEMAN_FIRE_ID", fire_id]
     if seccomp_fd >= 0:
         cmd += ["--seccomp", str(seccomp_fd)]
     cmd += ["--", "python3", "/tool/run.py"]

@@ -161,6 +161,33 @@ class Engine:
             (ok if success else dropped).append(name)
         return ok, dropped
 
+    async def run_event(
+        self,
+        event: RoutedEvent,
+        *,
+        state: dict | None = None,
+        transform_for_dispatch: Callable[[RoutedEvent, RoutingDecision], RoutedEvent] | None = None,
+    ) -> tuple[RoutingDecision, list[str], list[str]]:
+        """The full domain pipeline: decide -> persist audit -> dispatch.
+
+        Domains call this after they've INSERT'd their event into their
+        own table. Returns (decision, ok, dropped); `decision.expired` is
+        True when nothing was dispatched. Pass `transform_for_dispatch`
+        when the dispatch event needs to differ from the recorded event
+        (e.g. memory tagging `needs_review` per a router rule).
+        """
+        decision = await self.decide(event, state or {})
+        await self.persist_audit(decision)
+        if decision.expired:
+            return decision, [], []
+        dispatch_event = (
+            transform_for_dispatch(event, decision)
+            if transform_for_dispatch is not None
+            else event
+        )
+        ok, dropped = await self.dispatch_all(dispatch_event, decision)
+        return decision, ok, dropped
+
     async def record_dispatch(
         self,
         *,

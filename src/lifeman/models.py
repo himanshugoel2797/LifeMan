@@ -12,7 +12,14 @@ from pydantic import BaseModel, Field
 class ToolManifest(BaseModel):
     reads: list[str] = Field(default_factory=list, description="Data categories the tool can read")
     writes: list[str] = Field(default_factory=list, description="Data categories the tool can write")
-    network: list[str] = Field(default_factory=list, description="Allowed egress URLs")
+    network: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allowed egress hosts. Special tokens: '@unrestricted' (any "
+            "internet host), '@local' (loopback + RFC1918 only). Empty "
+            "list = no network."
+        ),
+    )
     compute_limits: dict = Field(default_factory=dict, description="CPU/mem/time limits")
     triggers: list[str] = Field(default_factory=list, description="Tools/actions this tool can trigger")
     user_visible: bool = True

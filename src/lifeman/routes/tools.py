@@ -312,6 +312,7 @@ async def _execute_tool(
     schedule_id: str | None = None,
     session_id: str | None = None,
     parent_invocation_id: str | None = None,
+    fire_id: str | None = None,
 ) -> dict:
     """Core tool execution logic used by API, scheduler, chat, and tool-side API."""
     db = await get_db()
@@ -321,27 +322,6 @@ async def _execute_tool(
     if not rows:
         return {"error": f"Tool '{tool_name}' not found", "_invocation_id": ""}
     tool = dict(rows[0])
-
-    # Create invocation record
-    inv_id = str(uuid.uuid4())[:12]
-    now = datetime.now(timezone.utc).isoformat()
-    await db.execute(
-        """INSERT INTO invocations
-           (id, tool, args_json, source, started_at, schedule_id, session_id,
-            parent_invocation_id, reason, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')""",
-        (
-            inv_id, tool_name, json.dumps(args), source, now, schedule_id,
-            session_id, parent_invocation_id, reason,
-        ),
-    )
-    await db.commit()
-    await bus.publish("invocation_started", {
-        "id": inv_id, "tool": tool_name, "source": source,
-        "session_id": session_id, "schedule_id": schedule_id,
-        "parent_invocation_id": parent_invocation_id,
-        "reason": reason, "started_at": now,
-    })
 
     # Load manifest + input schema from the latest version.
     timeout = 30.0
@@ -363,10 +343,8 @@ async def _execute_tool(
         except json.JSONDecodeError:
             schema_input = {}
 
-    # Validate args against schema_input when the tool declared one.
-    # Empty dict ({} on register) means "no contract" and skips the gate; a
-    # non-empty schema is opt-in enforcement so callers (the LLM in
-    # particular) get a clear error instead of a downstream tool crash.
+    # Validate args BEFORE creating the invocation row, so a bad-args call
+    # doesn't leave an orphaned `running` row or fire a misleading start event.
     validation_error: str | None = None
     if isinstance(schema_input, dict) and schema_input:
         try:
@@ -377,11 +355,59 @@ async def _execute_tool(
         except jsonschema.SchemaError as e:
             validation_error = f"schema_input itself is invalid: {e.message}"
 
+    # Create invocation record. If validation failed, record it as a finished
+    # error in a single INSERT so observers never see a transient `running`.
+    inv_id = str(uuid.uuid4())[:12]
+    now = datetime.now(timezone.utc).isoformat()
+    if validation_error is not None:
+        await db.execute(
+            """INSERT INTO invocations
+               (id, tool, args_json, source, started_at, finished_at,
+                schedule_id, session_id, parent_invocation_id, reason,
+                status, error, result_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'error', ?, ?)""",
+            (
+                inv_id, tool_name, json.dumps(args), source, now, now,
+                schedule_id, session_id, parent_invocation_id, reason,
+                validation_error, json.dumps({"error": validation_error}),
+            ),
+        )
+        await db.commit()
+        await audit.log(
+            source=source, action="invoke_tool", target=tool_name,
+            args_summary=json.dumps(args)[:200],
+            result_summary=validation_error[:200],
+            reason=reason,
+        )
+        await bus.publish("invocation_completed", {
+            "id": inv_id, "tool": tool_name, "source": source, "status": "error",
+            "session_id": session_id, "schedule_id": schedule_id,
+            "parent_invocation_id": parent_invocation_id,
+            "finished_at": now, "error": validation_error, "result": None,
+        })
+        return {"error": validation_error, "_invocation_id": inv_id}
+
+    await db.execute(
+        """INSERT INTO invocations
+           (id, tool, args_json, source, started_at, schedule_id, session_id,
+            parent_invocation_id, reason, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')""",
+        (
+            inv_id, tool_name, json.dumps(args), source, now, schedule_id,
+            session_id, parent_invocation_id, reason,
+        ),
+    )
+    await db.commit()
+    await bus.publish("invocation_started", {
+        "id": inv_id, "tool": tool_name, "source": source,
+        "session_id": session_id, "schedule_id": schedule_id,
+        "parent_invocation_id": parent_invocation_id,
+        "reason": reason, "started_at": now,
+    })
+
     # Run in sandbox, behind a per-invocation tool-side API socket.
     tool_dir = settings.get_tools_dir() / tool["id"]
-    if validation_error is not None:
-        result = {"error": validation_error}
-    elif not (tool_dir / "run.py").exists():
+    if not (tool_dir / "run.py").exists():
         result = {"error": "Tool code not found on disk"}
     else:
         async with ToolSocket(
@@ -394,6 +420,7 @@ async def _execute_tool(
                 tool_dir, args, timeout=timeout,
                 socket_path=str(ts.socket_path),
                 network_hosts=network_hosts,
+                fire_id=fire_id,
             )
 
     # Update invocation

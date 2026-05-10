@@ -93,12 +93,9 @@ async def observe(
     )
     await db.commit()
 
-    decision = await engine.decide(event, state={})
-    await engine.persist_audit(decision)
+    decision, ok, dropped = await engine.run_event(event)
     if decision.expired:
         return ObserveResponse(event_id=event_id, expired=True)
-
-    ok, dropped = await engine.dispatch_all(event, decision)
     # No general audit-log entry per observation — that would be infinitely
     # recursive (audit.log() is itself an observation candidate). We rely on
     # observation_dispatches for traceability.

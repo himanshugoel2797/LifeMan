@@ -165,26 +165,67 @@ async def emit_output(
         if ch is None:
             dropped.append(channel_name)
             continue
+
+        # State machine: insert the row as `in_flight` BEFORE calling
+        # the channel, so a concurrent cancel_output can observe and
+        # contend for the row instead of missing it. See module docstring
+        # in outputs/api.py for the transitions.
+        cursor = await db.execute(
+            """INSERT INTO output_deliveries
+                 (output_id, channel, delivered, status, delivered_at)
+               VALUES (?, ?, 0, 'in_flight', ?)""",
+            (output_id, channel_name, datetime.now(timezone.utc).isoformat()),
+        )
+        delivery_row_id = cursor.lastrowid
+        await db.commit()
+
         try:
             result: DeliveryResult = await ch.deliver(event)
         except Exception as e:  # noqa: BLE001
             log.exception("channel %s crashed delivering %s", channel_name, output_id)
             result = DeliveryResult(delivered=False, failure_reason=f"{type(e).__name__}: {e}")
-        await db.execute(
-            """INSERT INTO output_deliveries
-                 (output_id, channel, delivered, delivery_id, failure_reason, delivered_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+
+        # Atomic transition: only the still-in-flight row gets resolved.
+        # If a concurrent cancel_output flipped status to `cancel_pending`,
+        # the UPDATE matches zero rows and we honour the cancel below.
+        target_status = "delivered" if result.delivered else "failed"
+        cursor = await db.execute(
+            """UPDATE output_deliveries
+                  SET delivered = ?, delivery_id = ?, failure_reason = ?,
+                      status = ?, delivered_at = ?
+                WHERE id = ? AND status = 'in_flight'""",
             (
-                output_id,
-                channel_name,
                 int(result.delivered),
                 result.delivery_id,
                 result.failure_reason,
+                target_status,
                 datetime.now(timezone.utc).isoformat(),
+                delivery_row_id,
             ),
         )
         await db.commit()
-        if result.delivered:
+
+        if cursor.rowcount == 0 and result.delivered:
+            # cancel_output won the race. Tell the channel to recall the
+            # event we just delivered, then mark the row cancelled.
+            try:
+                await ch.cancel(output_id, result.delivery_id)
+            except Exception:  # noqa: BLE001
+                log.exception("post-deliver cancel failed on %s", channel_name)
+            await db.execute(
+                """UPDATE output_deliveries
+                      SET delivered = 1, delivery_id = ?, status = 'cancelled',
+                          cancelled_at = ?
+                    WHERE id = ?""",
+                (
+                    result.delivery_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    delivery_row_id,
+                ),
+            )
+            await db.commit()
+            dropped.append(channel_name)
+        elif result.delivered:
             dispatched_ok.append(channel_name)
         else:
             dropped.append(channel_name)
@@ -216,31 +257,59 @@ async def cancel_output(
     reason: str = "",
     source_tool: str = "",
 ) -> CancelOutputResponse:
-    """Recall a delivered event from every channel that took it."""
+    """Recall an event from every channel that took (or is taking) it.
+
+    Transitions the per-channel delivery state machine atomically:
+      * `in_flight` rows are flipped to `cancel_pending`. The emit_output
+        coroutine that owns the in-flight call sees the missed UPDATE and
+        runs the post-deliver cancel itself (so we don't double-cancel).
+      * `delivered` rows are flipped to `cancelled` and we call
+        `channel.cancel` here to recall the event.
+    """
     db = await get_db()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # First, claim all `in_flight` rows so the emit path takes the
+    # post-deliver cancel branch. We don't call channel.cancel ourselves
+    # for these — the emit coroutine has the delivery_id we need.
+    await db.execute(
+        """UPDATE output_deliveries
+              SET status = 'cancel_pending'
+            WHERE output_id = ? AND status = 'in_flight'""",
+        (output_id,),
+    )
+    await db.commit()
+
+    # Then handle rows that were already fully delivered. Atomic flip
+    # ensures we don't cancel the same row twice if a second cancel_output
+    # comes in.
     rows = await db.execute_fetchall(
-        "SELECT channel, delivery_id FROM output_deliveries "
-        "WHERE output_id = ? AND delivered = 1 AND cancelled_at IS NULL",
+        """SELECT id, channel, delivery_id FROM output_deliveries
+            WHERE output_id = ? AND status = 'delivered'""",
         (output_id,),
     )
     cancelled: list[str] = []
-    now = datetime.now(timezone.utc).isoformat()
     for r in rows:
+        cursor = await db.execute(
+            """UPDATE output_deliveries
+                  SET status = 'cancelled', cancelled_at = ?
+                WHERE id = ? AND status = 'delivered'""",
+            (now, r["id"]),
+        )
+        await db.commit()
+        if cursor.rowcount == 0:
+            continue  # someone else already cancelled this row
         ch = await tool_backed.resolve_channel(r["channel"])
         if ch is None:
             continue
         try:
             ok = await ch.cancel(output_id, r["delivery_id"])
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.exception("cancel failed on channel %s", r["channel"])
             ok = False
         if ok:
-            await db.execute(
-                "UPDATE output_deliveries SET cancelled_at = ? "
-                "WHERE output_id = ? AND channel = ?",
-                (now, output_id, r["channel"]),
-            )
             cancelled.append(r["channel"])
+
     await db.execute(
         "UPDATE output_events SET cancelled_at = ? WHERE id = ?",
         (now, output_id),

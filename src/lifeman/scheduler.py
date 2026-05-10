@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from lifeman.db import get_db
@@ -139,7 +140,12 @@ async def _fire(schedule: dict) -> None:
     )
     await db.commit()
 
-    log.info("Firing schedule %s for tool %s", schedule_id, tool_name)
+    # Stable per-fire id. Tools that do external side effects (HTTP POST,
+    # email, etc.) can use this as a dedup key in their state KV so a
+    # crash-mid-fire that triggers re-execution doesn't double-deliver.
+    fire_id = str(uuid.uuid4())[:12]
+
+    log.info("Firing schedule %s (fire %s) for tool %s", schedule_id, fire_id, tool_name)
     await audit.log(
         source="scheduler",
         action="fire_schedule",
@@ -147,10 +153,12 @@ async def _fire(schedule: dict) -> None:
         args_summary=json.dumps(args)[:200],
         reason=schedule["reason"],
     )
-    await bus.publish("schedule_fired", {"id": schedule_id, "tool": tool_name})
+    await bus.publish("schedule_fired", {"id": schedule_id, "tool": tool_name, "fire_id": fire_id})
 
     # Execute the tool
-    result = await _execute_tool(tool_name, args, source="schedule", schedule_id=schedule_id)
+    result = await _execute_tool(
+        tool_name, args, source="schedule", schedule_id=schedule_id, fire_id=fire_id,
+    )
 
     # Update schedule state
     total = schedule["total_fires"] + 1
@@ -180,45 +188,22 @@ async def _fire(schedule: dict) -> None:
 
 
 def _compute_next_fire(when_spec: str) -> str | None:
-    """Compute next fire time for recurring schedules. Returns None for one-shot.
+    """Compute the next fire time for a stored recurring schedule.
 
-    Mental model: "the next occurrence of HH:MM after now". Daily 23:00 fired
-    at 01:00 should pick today 23:00, not tomorrow's. Hourly :15 at 12:30
-    should pick 13:15.
+    Returns None for one-shot rows. Delegates to `compute_initial_fires_at`
+    so the "next occurrence of {recur, at} after now" logic lives in
+    exactly one place.
     """
     try:
         spec = json.loads(when_spec) if isinstance(when_spec, str) and when_spec.startswith("{") else None
     except json.JSONDecodeError:
         return None
-
     if not isinstance(spec, dict) or "recur" not in spec:
-        return None  # one-shot
-
-    now = datetime.now(timezone.utc)
-    recur = spec["recur"]
-    at_time = spec.get("at", "00:00")
-
-    # Parse target time
-    parts = at_time.split(":")
-    hour, minute = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
-
-    if recur == "hourly":
-        candidate = now.replace(minute=minute, second=0, microsecond=0)
-        if candidate <= now:
-            candidate += timedelta(hours=1)
-        next_dt = candidate
-    elif recur == "weekly":
-        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if candidate <= now:
-            candidate += timedelta(weeks=1)
-        next_dt = candidate
-    else:  # daily and unknown -> daily
-        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if candidate <= now:
-            candidate += timedelta(days=1)
-        next_dt = candidate
-
-    return next_dt.isoformat()
+        return None
+    try:
+        return compute_initial_fires_at(spec)
+    except ValueError:
+        return None
 
 
 def _parse_relative_duration(s: str) -> timedelta | None:
@@ -293,15 +278,20 @@ def compute_initial_fires_at(when) -> str:
             at_time = when.get("at", "00:00")
             parts = at_time.split(":")
             hour, minute = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if target <= now:
-                recur = when.get("recur", "daily")
-                if recur == "hourly":
+            recur = when.get("recur", "daily")
+            # Hourly intentionally ignores the HH portion: ":15" means
+            # ":15 of every hour", picked relative to *now*'s hour.
+            if recur == "hourly":
+                target = now.replace(minute=minute, second=0, microsecond=0)
+                if target <= now:
                     target += timedelta(hours=1)
-                elif recur == "weekly":
-                    target += timedelta(weeks=1)
-                else:
-                    target += timedelta(days=1)
+            else:
+                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if target <= now:
+                    if recur == "weekly":
+                        target += timedelta(weeks=1)
+                    else:
+                        target += timedelta(days=1)
             return target.isoformat()
 
     raise ValueError(

@@ -397,29 +397,72 @@ CREATE INDEX IF NOT EXISTS idx_permission_requests_status ON permission_requests
 """
 
 
-_SESSION_COLUMN_ADDS = [
-    ("title", "TEXT NOT NULL DEFAULT ''"),
-    ("external_id", "TEXT"),
-    ("archived_at", "TEXT"),
+# ---------------------------------------------------------------------------
+# Migrations
+# ---------------------------------------------------------------------------
+# Each migration is `(id, sql)`. Applied in order, exactly once, tracked in
+# the `schema_migrations` table. Both fresh installs and upgrades follow the
+# same path: SCHEMA above creates the baseline tables (idempotent IF NOT
+# EXISTS), then every migration runs whose id isn't recorded yet.
+#
+# Rules:
+#   * `id` must be a stable monotonic integer; never reuse or renumber.
+#   * `sql` must be idempotent — use IF NOT EXISTS on indexes, guard ALTER
+#     TABLE with a column-existence check (see `_apply_migration`), or fold
+#     the migration into the baseline SCHEMA when no live deployment needs
+#     the upgrade path.
+#   * One logical change per migration — keeps failure isolated.
+# Adding a column? Append to MIGRATIONS, leave SCHEMA alone (so the old
+# code path of "create from scratch then ALTER" stays unified with upgrades).
+_MIGRATIONS: list[tuple[int, str]] = [
+    (1, "ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT ''"),
+    (2, "ALTER TABLE sessions ADD COLUMN external_id TEXT"),
+    (3, "ALTER TABLE sessions ADD COLUMN archived_at TEXT"),
+    (4, "ALTER TABLE invocations ADD COLUMN session_id TEXT"),
+    (5, "ALTER TABLE invocations ADD COLUMN parent_invocation_id TEXT"),
+    (6, "ALTER TABLE invocations ADD COLUMN reason TEXT NOT NULL DEFAULT ''"),
+    (7, "ALTER TABLE invocations ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"),
+    (8, "ALTER TABLE permission_requests ADD COLUMN invocation_id TEXT"),
+    # Scheduler crash-recovery marker. Set just before the tool runs; cleared
+    # on success. If non-NULL on startup, the prior process crashed mid-fire
+    # and the scheduler resets fires_at to NOW so the row re-fires.
+    (9, "ALTER TABLE schedules ADD COLUMN last_started_at TEXT"),
+    # Defence-in-depth for the chat-appender seq atomic INSERT…SELECT.
+    (10, "CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_session_seq ON messages(session_id, seq)"),
+    # Output delivery state machine — see outputs/api.py. status governs
+    # atomic transitions between in_flight / delivered / failed / cancelled
+    # so cancel_output cannot race emit_output.
+    (11, "ALTER TABLE output_deliveries ADD COLUMN status TEXT NOT NULL DEFAULT 'delivered'"),
+    # Per-fire idempotence key for scheduled invocations (see scheduler.py).
+    (12, "ALTER TABLE invocations ADD COLUMN fire_id TEXT"),
 ]
 
-_INVOCATION_COLUMN_ADDS = [
-    ("session_id", "TEXT"),
-    ("parent_invocation_id", "TEXT"),
-    ("reason", "TEXT NOT NULL DEFAULT ''"),
-    ("status", "TEXT NOT NULL DEFAULT 'completed'"),
-]
 
-_PERMISSION_REQUEST_COLUMN_ADDS = [
-    ("invocation_id", "TEXT"),
-]
+async def _apply_migration(db: aiosqlite.Connection, mid: int, sql: str) -> None:
+    """Run one migration, tolerating "already applied" symptoms.
 
-_SCHEDULES_COLUMN_ADDS = [
-    # Crash-recovery marker. Set just before the tool runs; cleared on success.
-    # If a row has last_started_at IS NOT NULL on startup, the prior process
-    # crashed mid-fire and the scheduler resets fires_at to NOW so it re-fires.
-    ("last_started_at", "TEXT"),
-]
+    SQLite raises OperationalError on duplicate column or index. Treat that
+    as a sign the migration's effect is already present (e.g. earlier
+    versions of this app applied it via a different code path) and record
+    it as done.
+    """
+    try:
+        await db.execute(sql)
+    except aiosqlite.OperationalError as e:
+        msg = str(e).lower()
+        if "duplicate column" in msg or "already exists" in msg:
+            log.info("migration %d already present on disk: %s", mid, e)
+        else:
+            raise
+    await db.execute(
+        "INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+        (mid, _now()),
+    )
+
+
+def _now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -432,34 +475,19 @@ async def get_db() -> aiosqlite.Connection:
         await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA foreign_keys=ON")
         await _db.executescript(SCHEMA)
-        # Lightweight migration: add new columns if upgrading from older schema.
-        async def _migrate(table: str, adds: list[tuple[str, str]]) -> None:
-            cols = {r["name"] for r in await _db.execute_fetchall(f"PRAGMA table_info({table})")}
-            for col, ddl in adds:
-                if col not in cols:
-                    await _db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-
-        await _migrate("sessions", _SESSION_COLUMN_ADDS)
-        await _migrate("invocations", _INVOCATION_COLUMN_ADDS)
-        await _migrate("permission_requests", _PERMISSION_REQUEST_COLUMN_ADDS)
-        await _migrate("schedules", _SCHEDULES_COLUMN_ADDS)
-
-        # Guards the chat-appender seq race. Created here (not in SCHEMA) so
-        # an upgrade with pre-existing duplicates from earlier seq-race fires
-        # does not fail startup — the UNIQUE constraint is defence-in-depth
-        # for the application-level atomic INSERT…SELECT pattern.
-        try:
-            await _db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "uq_messages_session_seq ON messages(session_id, seq)"
+        await _db.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations ("
+            "id INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        applied = {
+            r["id"] for r in await _db.execute_fetchall(
+                "SELECT id FROM schema_migrations"
             )
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "could not create uq_messages_session_seq (likely pre-existing "
-                "duplicates from earlier seq race); leaving non-unique index in "
-                "place. Reason: %s", e,
-            )
-
+        }
+        for mid, sql in _MIGRATIONS:
+            if mid in applied:
+                continue
+            await _apply_migration(_db, mid, sql)
         await _db.commit()
     return _db
 

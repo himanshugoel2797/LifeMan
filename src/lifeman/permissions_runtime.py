@@ -10,17 +10,34 @@ DB row still has the canonical state.
 It also hosts the `scope_matches` predicate used by the request short-circuit
 logic and by tool-socket invoke checks. A grant covers a request only when:
 - grantee + capability match (handled at the SQL level), and
-- the grant's recorded `args_match` (if any) is a subset of the incoming
-  args, and
+- the grant's recorded `args_match` (if any) covers the incoming args, and
 - the grant has not expired.
+
+`args_match` values may be plain scalars (compared with ==) or predicate
+dicts. Supported predicates:
+
+  {"$any": true}              # wildcard — any value matches
+  {"$in": [v1, v2, ...]}      # value must be one of the listed values
+  {"$prefix": "https://x/"}   # string-prefix match
+  {"$glob": "*.example.com"}  # fnmatch-style glob
+  {"$regex": "^foo.*"}        # full re.fullmatch on string values
+
+A scope may also carry a top-level `network_mode` field for capabilities
+that gate egress: "unrestricted" (any host) or "local_only" (loopback +
+RFC1918 hosts). When set, host-level `args_match` checks are bypassed
+according to the mode.
 """
 
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import ipaddress
 import json
 import logging
+import re
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from lifeman.db import get_db
 
@@ -75,13 +92,63 @@ def notify_resolved(pid: str, status: str) -> None:
 # Scope evaluation
 # ---------------------------------------------------------------------------
 
+def _predicate_match(expected, actual) -> bool:
+    """Compare a grant value against a request value.
+
+    `expected` may be a plain scalar (==) or a predicate dict whose first
+    `$`-prefixed key selects the operator. Unknown operators fail closed.
+    """
+    if isinstance(expected, dict) and any(k.startswith("$") for k in expected):
+        if expected.get("$any") is True:
+            return True
+        if "$in" in expected:
+            options = expected["$in"]
+            return isinstance(options, list) and actual in options
+        if "$prefix" in expected:
+            prefix = expected["$prefix"]
+            return isinstance(prefix, str) and isinstance(actual, str) and actual.startswith(prefix)
+        if "$glob" in expected:
+            pattern = expected["$glob"]
+            return isinstance(pattern, str) and isinstance(actual, str) and fnmatch.fnmatchcase(actual, pattern)
+        if "$regex" in expected:
+            pattern = expected["$regex"]
+            try:
+                return isinstance(pattern, str) and isinstance(actual, str) and re.fullmatch(pattern, actual) is not None
+            except re.error:
+                return False
+        return False
+    return expected == actual
+
+
+def _host_is_local(host: str) -> bool:
+    """True if `host` resolves to a loopback or RFC1918 address.
+
+    Accepts a bare hostname/IP or a URL. Hostnames that aren't IPs are
+    matched only if they're literal "localhost"; we don't do DNS here
+    because that's a runtime, capability-check moment and DNS is too slow
+    and too forgeable to be a security boundary.
+    """
+    if not isinstance(host, str) or not host:
+        return False
+    if "://" in host:
+        host = urlparse(host).hostname or ""
+    if host.lower() in {"localhost", "ip6-localhost", "ip6-loopback"}:
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_loopback or addr.is_private or addr.is_link_local
+
+
 def scope_matches(grant_scope: dict, request_scope: dict) -> bool:
     """Does an existing grant's recorded scope cover the new request?
 
-    Today scope is a small dict with optional keys:
-      - args_match: dict whose entries must all be present (==) in
-        request_scope.get("args") or request_scope itself. If the grant
-        carries args_match, the request must satisfy every key.
+    Scope is a dict with optional keys:
+      - args_match: dict whose entries must all match the request args.
+        Values may be scalars or predicate dicts (see module docstring).
+      - network_mode: "unrestricted" (covers any host arg) or "local_only"
+        (covers args naming a loopback / RFC1918 / link-local address).
 
     Other keys (`requester`, `expires_at`, `until`) are matched at SQL or
     handled by the column-level expiry check; this predicate ignores them.
@@ -93,17 +160,29 @@ def scope_matches(grant_scope: dict, request_scope: dict) -> bool:
     if not isinstance(grant_scope, dict):
         return False
 
+    candidate = request_scope.get("args") if isinstance(request_scope, dict) else None
+    if not isinstance(candidate, dict):
+        candidate = request_scope if isinstance(request_scope, dict) else {}
+
+    mode = grant_scope.get("network_mode")
+    if mode == "unrestricted":
+        return True
+    if mode == "local_only":
+        # Look at any arg that smells like a host/url and require all such
+        # args to be local. Non-network args are passed through to the
+        # args_match check below.
+        for key in ("host", "hostname", "url", "endpoint"):
+            if key in candidate and not _host_is_local(candidate[key]):
+                return False
+    elif mode is not None:
+        return False
+
     grant_args = grant_scope.get("args_match")
     if grant_args:
         if not isinstance(grant_args, dict):
             return False
-        # Compare against either the explicit args sub-dict or the whole
-        # request scope, whichever has more data.
-        candidate = request_scope.get("args") if isinstance(request_scope, dict) else None
-        if not isinstance(candidate, dict):
-            candidate = request_scope if isinstance(request_scope, dict) else {}
         for k, v in grant_args.items():
-            if candidate.get(k) != v:
+            if not _predicate_match(v, candidate.get(k)):
                 return False
     return True
 
