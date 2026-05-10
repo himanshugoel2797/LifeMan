@@ -40,6 +40,43 @@
     </form>
 </details>
 
+<h2>Digest queue</h2>
+<p class="reason">Events the router sent to the digest accumulator. They are silent in real time; a digest-delivery tool would drain this queue periodically.</p>
+{% if digest %}
+<table>
+    <thead>
+        <tr>
+            <th>When</th>
+            <th>From</th>
+            <th>Category</th>
+            <th>Urgency</th>
+            <th>Content</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for o in digest %}
+        <tr>
+            <td class="timestamp">{{ (o.delivered_at or o.emitted_at)[:19] }}</td>
+            <td><span class="tag">{{ o.source_tool or '—' }}</span></td>
+            <td>{{ o.category }}</td>
+            <td><span class="tag">{{ o.urgency }}</span></td>
+            <td style="max-width:380px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                {% if o.content is mapping %}
+                    {{ o.content.get('title') or (o.content.get('body') or '')[:120] }}
+                {% else %}
+                    {{ (o.content or '')[:120] }}
+                {% endif %}
+            </td>
+            <td><a class="btn" href="/outputs/{{ o.id }}">Detail</a></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">Digest queue is empty.</div>
+{% endif %}
+
 <h2>Recent outputs</h2>
 {% if items %}
 <table>

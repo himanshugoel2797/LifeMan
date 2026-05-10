@@ -120,12 +120,26 @@ async def permissions_page(request: Request):
     grants = await db.execute_fetchall(
         "SELECT * FROM permissions WHERE revoked_at IS NULL ORDER BY granted_at DESC LIMIT 50"
     )
+    recent = await db.execute_fetchall(
+        "SELECT * FROM permission_requests WHERE status != 'pending' "
+        "ORDER BY COALESCE(resolved_at, requested_at) DESC LIMIT 20"
+    )
+
+    def _row(r):
+        d = dict(r)
+        try:
+            d["scope"] = json.loads(d.get("scope_json") or "{}")
+        except (TypeError, ValueError):
+            d["scope"] = {}
+        return d
+
     return templates.TemplateResponse(
         request,
         "permissions.html",
         {
-            "pending": [dict(r) for r in pending],
+            "pending": [_row(r) for r in pending],
             "grants": [dict(r) for r in grants],
+            "recent": [_row(r) for r in recent],
         },
     )
 
@@ -396,10 +410,31 @@ async def outputs_page(request: Request):
     channels = [c.manifest.model_dump() for c in registry.all()]
     rules = [r.model_dump() for r in await load_rules()]
 
+    # Digest queue: events routed to the digest accumulator that haven't been
+    # cancelled. Until a morning-brief tool drains the queue, this panel is
+    # the only way to see what the router silenced.
+    digest_rows = await db.execute_fetchall(
+        "SELECT e.id, e.source_tool, e.category, e.urgency, e.content_json, "
+        "       e.reason, e.emitted_at, d.delivered_at "
+        "FROM output_deliveries d "
+        "JOIN output_events e ON e.id = d.output_id "
+        "WHERE d.channel = 'digest' AND d.delivered = 1 "
+        "  AND d.cancelled_at IS NULL AND e.cancelled_at IS NULL "
+        "ORDER BY d.delivered_at DESC LIMIT 50"
+    )
+    digest = []
+    for r in digest_rows:
+        r = dict(r)
+        try:
+            r["content"] = json.loads(r["content_json"]) if r.get("content_json") else {}
+        except json.JSONDecodeError:
+            r["content"] = {}
+        digest.append(r)
+
     return templates.TemplateResponse(
         request,
         "outputs.html",
-        {"items": items, "channels": channels, "rules": rules},
+        {"items": items, "channels": channels, "rules": rules, "digest": digest},
     )
 
 

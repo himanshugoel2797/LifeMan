@@ -52,6 +52,11 @@ class ToolSocket:
         self._tmpdir: Path | None = None
         self._server: asyncio.AbstractServer | None = None
         self.socket_path: Path | None = None
+        # Tracks whether the tool produced any user-visible output during this
+        # invocation. _execute_tool reads this after the run to decide whether
+        # to auto-emit a completion notification for user-initiated calls —
+        # otherwise a tool that only returns a dict produces nothing visible.
+        self.outputs_emitted: int = 0
 
     async def __aenter__(self) -> "ToolSocket":
         self._tmpdir = Path(tempfile.mkdtemp(prefix="lifeman-tool-"))
@@ -169,6 +174,7 @@ class ToolSocket:
                 reason=params.get("reason", ""),
                 source_tool=f"tool:{self.tool_name}",
             )
+            self.outputs_emitted += 1
             return {"result": res.model_dump()}
 
         if method == "emit_output":
@@ -185,6 +191,7 @@ class ToolSocket:
                 reason=params.get("reason", ""),
                 source_tool=f"tool:{self.tool_name}",
             )
+            self.outputs_emitted += 1
             return {"result": res.model_dump()}
 
         if method == "cancel_output":

@@ -19,6 +19,9 @@ import json
 import logging
 from datetime import datetime, timezone
 
+import asyncio
+
+from lifeman.config import settings
 from lifeman.db import get_db
 from lifeman.outputs.models import (
     OutputEvent,
@@ -223,9 +226,17 @@ async def route(event: OutputEvent, *, user_state: dict | None = None) -> Routin
     decision.matched_rules = matched_positions
 
     if base_channels is None:
-        # Conservative default for unmatched (category, urgency)
-        base_channels = ["digest"]
-        decision.notes = "no rule matched; defaulted to digest"
+        # No rule matched. Before defaulting to digest (which is silent in
+        # real time), give the local LLM a shot at picking sensible channels
+        # from the installed set. Falls back to digest if disabled, the LLM
+        # is unreachable, or the response isn't usable.
+        llm_pick = await _llm_pick_channels(event)
+        if llm_pick is not None:
+            base_channels = llm_pick
+            decision.notes = f"no rule matched; LLM picked {llm_pick}"
+        else:
+            base_channels = ["digest"]
+            decision.notes = "no rule matched; defaulted to digest"
 
     # Apply overrides — they can either replace channels or defer-to-digest.
     for ov in overrides:
@@ -272,6 +283,94 @@ async def route(event: OutputEvent, *, user_state: dict | None = None) -> Routin
 
     decision.dispatched = final
     return decision
+
+
+async def _llm_pick_channels(event: OutputEvent) -> list[str] | None:
+    """Ask the local LLM which installed channels should receive this event.
+
+    Returns a list of channel names (subset of what's installed) or `None` to
+    signal "give up, use the digest default". Soft-fails on every error path
+    — the router must stay deterministic enough to deliver something.
+    """
+    if not settings.output_router_llm_fallback:
+        return None
+    available = registry.names()
+    if not available:
+        return None
+
+    from lifeman.llm import stream_chat, LLMError
+
+    channel_lines = []
+    for name in available:
+        ch = registry.get(name)
+        m = ch.manifest if ch is not None else None
+        if m is None:
+            continue
+        caps = m.capabilities
+        channel_lines.append(
+            f"- {name} ({m.channel_type}, latency~{caps.typical_latency_ms}ms, "
+            f"persistence={caps.persistence}, actions={caps.actions}, "
+            f"interruption={caps.interruption_level})"
+        )
+
+    if isinstance(event.content, str):
+        content_summary = event.content[:200]
+    else:
+        cd = event.content.model_dump() if hasattr(event.content, "model_dump") else {}
+        content_summary = (cd.get("title") or "")[:80] + " | " + (cd.get("body") or "")[:200]
+
+    user_prompt = (
+        "An output event has no matching routing rule. Pick the installed "
+        "channels that should deliver it. Reply with a JSON object only: "
+        '{"channels": ["name", ...]}. Use [] to silence. Prefer one channel '
+        "unless redundancy is clearly warranted.\n\n"
+        f"Event:\n  category: {event.category}\n  urgency: {event.urgency}\n"
+        f"  sensitivity: {event.sensitivity}\n  source_tool: {event.source_tool}\n"
+        f"  has_actions: {bool(event.actions)}\n  content: {content_summary}\n\n"
+        "Installed channels:\n" + "\n".join(channel_lines)
+    )
+
+    messages = [
+        {"role": "system",
+         "content": "You are the output router for lifeman. Reply with JSON only."},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    try:
+        text_parts: list[str] = []
+        async def _consume():
+            async for delta in stream_chat(messages, temperature=0.0):
+                if "content" in delta and delta["content"]:
+                    text_parts.append(delta["content"])
+                if delta.get("finish_reason"):
+                    return
+        await asyncio.wait_for(_consume(), timeout=settings.output_router_llm_timeout)
+        text = "".join(text_parts).strip()
+    except (LLMError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
+        log.info("router LLM fallback unavailable: %s", e)
+        return None
+
+    # Extract the first JSON object — models often wrap in prose despite the
+    # instruction. We accept any object containing a "channels" array.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        log.info("router LLM returned no JSON: %r", text[:200])
+        return None
+    try:
+        obj = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        log.info("router LLM JSON unparseable: %r", text[start:end + 1][:200])
+        return None
+    raw = obj.get("channels")
+    if not isinstance(raw, list):
+        return None
+    picked = [c for c in raw if isinstance(c, str) and c in available]
+    if not picked:
+        # An empty pick is a deliberate "silence" — represent that with the
+        # digest channel so the event is still recorded for the morning brief.
+        return ["digest"] if "digest" in available else []
+    return picked
 
 
 async def _rate_limited(name: str, channel) -> bool:

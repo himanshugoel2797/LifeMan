@@ -13,8 +13,15 @@
     <div class="card-header">
         <span class="card-title">{{ req.capability }}</span>
         <span class="tag">{{ req.requester }}</span>
+        <span class="timestamp" style="margin-left:auto;">{{ req.requested_at[:19] }}</span>
     </div>
-    <div class="reason">{{ req.reason }}</div>
+    {% if req.reason %}<div class="reason">{{ req.reason }}</div>{% endif %}
+    {% if req.scope %}
+    <details style="margin-top:8px;">
+        <summary style="cursor:pointer; font-size:0.9em; color:var(--muted, #888);">scope</summary>
+        <pre style="margin:6px 0 0; font-size:0.85em; white-space:pre-wrap; word-break:break-word;">{{ req.scope | tojson(indent=2) }}</pre>
+    </details>
+    {% endif %}
     <div style="margin-top: 12px;" class="btn-group">
         <button class="btn btn-success"
                 hx-post="/api/permissions/{{ req.id }}/resolve"
@@ -72,5 +79,41 @@
 </table>
 {% else %}
 <div class="empty">No active permission grants.</div>
+{% endif %}
+
+<h2>Recent Activity</h2>
+{% if recent %}
+<table>
+    <thead>
+        <tr>
+            <th>Status</th>
+            <th>Requester</th>
+            <th>Capability</th>
+            <th>Reason</th>
+            <th>Resolved</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in recent %}
+        <tr>
+            <td>
+                {% if r.status.startswith('granted') %}
+                    <span class="tag tag-success">{{ r.status }}</span>
+                {% elif r.status == 'denied' %}
+                    <span class="tag" style="border-color:var(--danger); color:var(--danger);">denied</span>
+                {% else %}
+                    <span class="tag">{{ r.status }}</span>
+                {% endif %}
+            </td>
+            <td><span class="tag">{{ r.requester }}</span></td>
+            <td>{{ r.capability }}</td>
+            <td style="max-width:32em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="{{ r.reason or '' }}">{{ r.reason or '' }}</td>
+            <td class="timestamp">{{ (r.resolved_at or r.requested_at)[:19] }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No resolved requests yet.</div>
 {% endif %}
 {% endblock %}

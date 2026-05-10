@@ -130,6 +130,24 @@ TOOL_CONTRACT = dedent(
       through the core `invoke` API rather than duplicating logic.
     - Every result includes a stable shape — keep field names compatible
       across versions.
+
+    ### Surfacing results to the user
+    The dict a tool returns on stdout is **not** user-visible on its own — it
+    only lives in the invocation log. If the user should *see* something
+    (a value, status, confirmation), call the tool-side API:
+
+    ```python
+    from lifeman_tool import notify
+    notify(message="Greeting computed: hello", category="completion",
+           urgency="soft", reason="show greeting to user")
+    ```
+
+    Pick `category` and `urgency` so the router sends it to a real channel:
+    `completion`/`alert`/`progress`/`query` route to `web_toast`; bare
+    `status`/`ambient` go to the digest and are silent in real time. If a
+    user-initiated invocation finishes without emitting any output, the core
+    auto-emits a fallback completion notification with the return dict — but
+    a deliberate `notify()` with a human-readable message is always better.
     """
 )
 

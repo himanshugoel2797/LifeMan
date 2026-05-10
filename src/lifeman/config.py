@@ -34,6 +34,12 @@ class Settings(BaseSettings):
         "Be concise. Use tools when appropriate. Do not guess the time — call the now tool."
     )
 
+    # Output router LLM fallback. When the rule table matches nothing, the
+    # router can ask the local LLM to pick channels instead of silently
+    # defaulting to the digest. Off by default in tests; on in normal runs.
+    output_router_llm_fallback: bool = True
+    output_router_llm_timeout: float = 5.0
+
     # Ollama supervisor
     ollama_bin: str = "ollama"
     ollama_autostart: bool = True

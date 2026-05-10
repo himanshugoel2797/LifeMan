@@ -26,8 +26,12 @@ async def temp_db(tmp_path: Path):
 
     prev_path = settings.db_path
     prev_data_dir = settings.data_dir
+    prev_llm_fallback = settings.output_router_llm_fallback
     settings.db_path = tmp_path / "test.db"
     settings.data_dir = tmp_path
+    # Tests must not call out to the local LLM by default. Tests that
+    # exercise the LLM-assisted router fallback flip this back on.
+    settings.output_router_llm_fallback = False
     # The secrets module memoises the master key; swapping data_dir means
     # we want a fresh per-test key in the new location.
     from lifeman.secrets import crypto as secrets_crypto
@@ -54,4 +58,5 @@ async def temp_db(tmp_path: Path):
         await db_mod.close_db()
         settings.db_path = prev_path
         settings.data_dir = prev_data_dir
+        settings.output_router_llm_fallback = prev_llm_fallback
         secrets_crypto.reset_cache_for_tests()

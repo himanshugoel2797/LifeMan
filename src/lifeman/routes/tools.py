@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger("lifeman.routes.tools")
 
 import jsonschema
 from fastapi import APIRouter, Depends, HTTPException
@@ -407,6 +410,7 @@ async def _execute_tool(
 
     # Run in sandbox, behind a per-invocation tool-side API socket.
     tool_dir = settings.get_tools_dir() / tool["id"]
+    outputs_emitted = 0
     if not (tool_dir / "run.py").exists():
         result = {"error": "Tool code not found on disk"}
     else:
@@ -422,6 +426,30 @@ async def _execute_tool(
                 network_hosts=network_hosts,
                 fire_id=fire_id,
             )
+            outputs_emitted = ts.outputs_emitted
+
+    # Auto-emit a completion output for user-initiated invocations that didn't
+    # surface anything themselves. Without this, a tool that just returns a
+    # dict (e.g. {"greeting": "hello"}) is invisible — the result lives on the
+    # invocation detail page but never reaches a notification channel. Only
+    # fires for `source == "user"`: tool-to-tool and scheduled runs stay quiet.
+    if source == "user" and outputs_emitted == 0 and not result.get("error"):
+        try:
+            from lifeman.outputs import emit_output
+            from lifeman.outputs.models import StructuredContent
+
+            body = json.dumps(result, default=str)
+            if len(body) > 400:
+                body = body[:397] + "..."
+            await emit_output(
+                content=StructuredContent(title=tool_name, body=body),
+                category="completion",
+                urgency="soft",
+                reason=f"auto: invocation {inv_id} returned no output",
+                source_tool=f"tool:{tool_name}",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("auto-emit completion output failed for %s", inv_id)
 
     # Update invocation
     finished = datetime.now(timezone.utc).isoformat()
