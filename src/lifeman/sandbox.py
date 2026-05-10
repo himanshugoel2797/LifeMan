@@ -330,6 +330,19 @@ def _build_bwrap_cmd(
             cmd += ["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"]
         if Path("/etc/hosts").exists():
             cmd += ["--ro-bind", "/etc/hosts", "/etc/hosts"]
+        # Expose the system CA bundle so TLS verification works. Python's
+        # ssl module reads from a small set of well-known paths (varying by
+        # distro) plus `SSL_CERT_FILE` / `SSL_CERT_DIR` env vars. Without
+        # any of these visible, urllib raises CERTIFICATE_VERIFY_FAILED for
+        # every HTTPS request — even though `--share-net` made the network
+        # reachable. We bind the directories that hold the certs (not just
+        # the symlinked .crt) because most Debian-shaped systems use a
+        # symlink chain that points into /etc/ssl/certs and /usr/share/...
+        # /usr is already bound above, so binding /etc/ssl + /etc/pki
+        # covers the remaining roots.
+        for ca_path in ("/etc/ssl", "/etc/pki", "/etc/ca-certificates"):
+            if Path(ca_path).exists():
+                cmd += ["--ro-bind", ca_path, ca_path]
         cmd += [
             "--setenv", "LIFEMAN_NETWORK_HOSTS", ",".join(network_hosts),
         ]
