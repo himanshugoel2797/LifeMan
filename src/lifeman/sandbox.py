@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -12,10 +13,81 @@ from pathlib import Path
 from lifeman.config import settings
 from lifeman.tool_socket import SANDBOX_RUNTIME_PATH, SANDBOX_SOCKET_PATH
 
+log = logging.getLogger("lifeman.sandbox")
+
 
 def _runtime_dir() -> Path:
     """Directory containing the sandbox-side `lifeman_tool.py` helper."""
     return Path(__file__).parent / "tool_runtime"
+
+
+# Sandbox-side uid: nobody. Inside the user namespace, the tool sees this uid;
+# outside it maps back to the calling user. Combined with --cap-drop ALL and
+# --new-session this gives a real "unprivileged user" rather than running as
+# the calling user inside the namespace.
+_SANDBOX_UID = 65534
+_SANDBOX_GID = 65534
+
+
+_seccomp_warning_logged = False
+
+
+def _build_seccomp_filter() -> bytes | None:
+    """Return a serialised BPF seccomp filter, or None if unavailable.
+
+    Uses libseccomp's Python bindings (`seccomp` or `pyseccomp`) when
+    installed. Allows a generous baseline and denies a small set of
+    historically-dangerous syscalls (mount/keyctl/etc.). The filter is
+    intentionally permissive — it's a defence-in-depth backstop on top of
+    namespace isolation, not the primary access-control layer.
+    """
+    global _seccomp_warning_logged
+    try:
+        import seccomp as _seccomp  # type: ignore[import-not-found]
+    except ImportError:
+        try:
+            import pyseccomp as _seccomp  # type: ignore[import-not-found]
+        except ImportError:
+            if not _seccomp_warning_logged:
+                log.warning(
+                    "sandbox: neither 'seccomp' nor 'pyseccomp' is installed; "
+                    "no seccomp filter will be applied. The bubblewrap namespace "
+                    "isolation still applies; install libseccomp Python bindings "
+                    "for defence-in-depth."
+                )
+                _seccomp_warning_logged = True
+            return None
+
+    # Allow everything by default, then deny syscalls a sandboxed personal
+    # tool has no business issuing. This is conservative — broaden the
+    # denylist as concrete attack scenarios are identified.
+    f = _seccomp.SyscallFilter(_seccomp.ALLOW)
+    deny_syscalls = (
+        "mount", "umount", "umount2", "pivot_root", "chroot",
+        "init_module", "finit_module", "delete_module",
+        "kexec_load", "kexec_file_load",
+        "reboot", "swapon", "swapoff",
+        "ptrace", "process_vm_readv", "process_vm_writev",
+        "keyctl", "add_key", "request_key",
+        "bpf",
+        "perf_event_open",
+        "userfaultfd",
+    )
+    for name in deny_syscalls:
+        try:
+            f.add_rule(_seccomp.ERRNO(1), name)  # 1 == EPERM
+        except (ValueError, OSError):
+            # Syscall name unknown to this libseccomp build — skip it.
+            continue
+
+    # Export to BPF bytes via a temp file (avoids pipe-buffer blocking and
+    # works regardless of how libseccomp writes — a few syscalls or one big
+    # write).
+    with tempfile.NamedTemporaryFile() as tf:
+        f.export_bpf(tf.fileno())
+        tf.flush()
+        tf.seek(0)
+        return tf.read()
 
 
 async def run_tool(
@@ -79,22 +151,44 @@ async def _run_sandboxed(
 ) -> dict:
     """Run tool inside bubblewrap sandbox."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        cmd = _build_bwrap_cmd(tool_dir, Path(tmpdir), socket_path)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        # If libseccomp is available, materialise the filter and pass it via a
+        # dedicated FD that bwrap inherits (--seccomp <FD>). The fd is opened
+        # inheritable; bwrap reads + closes it before exec.
+        seccomp_bpf = _build_seccomp_filter()
+        seccomp_fd = -1
+        pass_fds: tuple[int, ...] = ()
+        if seccomp_bpf:
+            r, w = os.pipe()
+            os.write(w, seccomp_bpf)
+            os.close(w)
+            os.set_inheritable(r, True)
+            seccomp_fd = r
+            pass_fds = (r,)
+
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=input_json.encode()),
-                timeout=timeout,
+            cmd = _build_bwrap_cmd(tool_dir, Path(tmpdir), socket_path, seccomp_fd)
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                pass_fds=pass_fds,
             )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return {"error": f"Tool execution timed out after {timeout}s"}
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=input_json.encode()),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return {"error": f"Tool execution timed out after {timeout}s"}
+        finally:
+            if seccomp_fd >= 0:
+                try:
+                    os.close(seccomp_fd)
+                except OSError:
+                    pass
 
         if proc.returncode != 0:
             return {"error": f"Tool exited with code {proc.returncode}", "stderr": stderr.decode()[:2000]}
@@ -106,18 +200,32 @@ async def _run_sandboxed(
 
 
 def _build_bwrap_cmd(
-    tool_dir: Path, scratch_dir: Path, socket_path: str | None
+    tool_dir: Path,
+    scratch_dir: Path,
+    socket_path: str | None,
+    seccomp_fd: int = -1,
 ) -> list[str]:
     """Build the bubblewrap command with layered isolation."""
     bwrap = settings.bwrap_path
     runtime = _runtime_dir()
 
     # Bind paths first so reordering or extending the binds list later doesn't
-    # silently break the command's structure.
-    binds: list[tuple[str, str, str]] = [
+    # silently break the command's structure. Each bind is conditional on the
+    # source existing — this keeps the sandbox usable on systems with a
+    # different filesystem layout (NixOS, Alpine, distroless containers) where
+    # /bin or /lib may not exist as standalone trees.
+    candidate_binds: list[tuple[str, str, str]] = [
         ("--ro-bind", "/usr", "/usr"),
         ("--ro-bind", "/bin", "/bin"),
         ("--ro-bind", "/lib", "/lib"),
+        ("--ro-bind", "/lib64", "/lib64"),
+        ("--ro-bind", "/etc/alternatives", "/etc/alternatives"),
+        ("--ro-bind", "/nix", "/nix"),  # NixOS systems
+    ]
+    binds: list[tuple[str, str, str]] = [
+        b for b in candidate_binds if Path(b[1]).exists()
+    ]
+    binds += [
         ("--ro-bind", str(tool_dir), "/tool"),
         ("--bind", str(scratch_dir), "/scratch"),
         ("--ro-bind", str(runtime), SANDBOX_RUNTIME_PATH),
@@ -129,7 +237,7 @@ def _build_bwrap_cmd(
     python_path = shutil.which("python3")
     if python_path:
         prefix = str(Path(python_path).resolve().parent.parent)
-        if prefix not in ("/usr", "/"):
+        if prefix not in ("/usr", "/") and Path(prefix).exists():
             binds.append(("--ro-bind", prefix, prefix))
 
     cmd: list[str] = [
@@ -137,13 +245,32 @@ def _build_bwrap_cmd(
         # Namespace isolation
         "--unshare-all",
         "--die-with-parent",
+        # Detach from controlling terminal — defends against TIOCSTI input
+        # injection back to the user's shell.
+        "--new-session",
+        # Drop every Linux capability inside the namespace. Belt-and-suspenders
+        # alongside the userns drop below: even if some host binary happened to
+        # be setuid, it can't exercise privileged operations.
+        "--cap-drop", "ALL",
+        # Inside the unshared user namespace, the calling user is initially
+        # mapped to uid 0. Drop to nobody so the tool sees an unprivileged uid
+        # — fulfils the design's "process under unprivileged user" promise
+        # without requiring a real OS-level account.
+        "--uid", str(_SANDBOX_UID),
+        "--gid", str(_SANDBOX_GID),
     ]
     for flag, src, dst in binds:
         cmd += [flag, src, dst]
 
+    # /lib64 is sometimes a symlink to usr/lib64 on Debian-shaped systems and
+    # sometimes a real directory on others (e.g. RHEL). If the bind above
+    # didn't cover it, fall back to the symlink shape.
+    if not Path("/lib64").is_dir():
+        cmd += ["--symlink", "usr/lib64", "/lib64"]
+
     cmd += [
-        "--symlink", "usr/lib64", "/lib64",
         "--dev", "/dev",
+        "--proc", "/proc",
         "--tmpfs", "/tmp",
         "--chdir", "/tool",
         # Python path includes the helper dir so tools can `import lifeman_tool`.
@@ -158,5 +285,7 @@ def _build_bwrap_cmd(
             "--bind", socket_path, SANDBOX_SOCKET_PATH,
             "--setenv", "LIFEMAN_TOOL_SOCKET", SANDBOX_SOCKET_PATH,
         ]
+    if seccomp_fd >= 0:
+        cmd += ["--seccomp", str(seccomp_fd)]
     cmd += ["--", "python3", "/tool/run.py"]
     return cmd
