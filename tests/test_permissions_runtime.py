@@ -107,6 +107,13 @@ def test_scope_matches_falls_back_to_request_when_no_args_subdict():
     assert pr.scope_matches(grant, request)
 
 
+def test_scope_matches_rejects_non_dict_grant_scope():
+    """Corrupted/malformed scope rows must fail closed."""
+    assert not pr.scope_matches(None, {})
+    assert not pr.scope_matches([], {})
+    assert not pr.scope_matches("everything", {"args": {"x": 1}})
+
+
 # ---------------------------------------------------------------------------
 # grant_expires_at
 # ---------------------------------------------------------------------------

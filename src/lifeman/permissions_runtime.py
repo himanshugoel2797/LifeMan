@@ -85,9 +85,13 @@ def scope_matches(grant_scope: dict, request_scope: dict) -> bool:
 
     Other keys (`requester`, `expires_at`, `until`) are matched at SQL or
     handled by the column-level expiry check; this predicate ignores them.
+
+    Fail-safety: a non-dict grant_scope (corrupted row, partial write, or
+    a future migration bug) returns False so callers move on to the next
+    candidate rather than silently treating it as a universal grant.
     """
     if not isinstance(grant_scope, dict):
-        return True
+        return False
 
     grant_args = grant_scope.get("args_match")
     if grant_args:
