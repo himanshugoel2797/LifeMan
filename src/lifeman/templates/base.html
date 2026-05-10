@@ -548,7 +548,11 @@
         let sseReplayDone = false;
         const sseUrl = (() => {
             const stored = sessionStorage.getItem(SSE_CURSOR_KEY);
-            return stored ? `/events?since_seq=${encodeURIComponent(stored)}` : '/events';
+            const params = new URLSearchParams();
+            if (stored) params.set('since_seq', stored);
+            if (window.LIFEMAN_TOKEN) params.set('token', window.LIFEMAN_TOKEN);
+            const qs = params.toString();
+            return qs ? `/events?${qs}` : '/events';
         })();
         const evtSource = new EventSource(sseUrl);
 
@@ -585,8 +589,18 @@
             try {
                 const data = JSON.parse(e.data || '{}');
                 const c = data.content || {};
-                const msg = c.title && c.body ? `${c.title}: ${c.body}`
-                          : (c.title || c.body || '');
+                // Fall back through every textual field so structured events
+                // that only set markdown / fields still surface something.
+                let msg = '';
+                if (c.title && c.body) msg = `${c.title}: ${c.body}`;
+                else if (c.title) msg = c.title;
+                else if (c.body) msg = c.body;
+                else if (c.markdown) msg = c.markdown;
+                else if (c.fields && typeof c.fields === 'object') {
+                    msg = Object.entries(c.fields)
+                        .map(([k, v]) => `${k}: ${v}`).join(', ');
+                }
+                if (!msg && typeof c === 'string') msg = c;
                 if (msg) window.toast(msg, data.urgency === 'urgent' ? 'err' : 'ok');
             } catch (_) {}
         });

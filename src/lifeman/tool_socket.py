@@ -165,10 +165,16 @@ class ToolSocket:
         if method == "notify":
             from lifeman.outputs import emit_output
 
+            message = params.get("message", "")
+            if not isinstance(message, str):
+                return {"error": (
+                    "'message' must be a string; use emit_output for "
+                    "structured content"
+                )}
             res = await emit_output(
-                content=str(params.get("message", ""))[:1000],
-                category=params.get("category", "status"),
-                urgency=params.get("urgency", "ambient"),
+                content=message[:1000],
+                category=params.get("category", "completion"),
+                urgency=params.get("urgency", "soft"),
                 expires_at=params.get("expires_at"),
                 context=params.get("context") or {},
                 reason=params.get("reason", ""),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
@@ -506,9 +506,26 @@ async def output_detail_page(request: Request, output_id: str):
 
 
 @router.get("/events")
-async def sse_events(request: Request, since_seq: int | None = None):
+async def sse_events(
+    request: Request,
+    since_seq: int | None = None,
+    token: str | None = None,
+):
     """SSE stream. Pass `?since_seq=N` to replay events newer than N from the
-    bus's in-memory ring buffer."""
+    bus's in-memory ring buffer.
+
+    Requires `?token=<bearer>` because EventSource can't set Authorization
+    headers. The UI template appends `window.LIFEMAN_TOKEN` automatically.
+    """
+    # Accept the token from either the Authorization header (for non-browser
+    # clients) or the query param (browsers, since EventSource has no header
+    # API). Local-only server, but still don't leak permission/output events
+    # to any process that can hit 127.0.0.1.
+    auth = request.headers.get("authorization") or ""
+    header_token = auth.removeprefix("Bearer ").strip() if auth.lower().startswith("bearer ") else ""
+    supplied = token or header_token
+    if supplied != settings.token:
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
     async def event_generator():
         async for msg in bus.subscribe(since_seq=since_seq):
             if await request.is_disconnected():

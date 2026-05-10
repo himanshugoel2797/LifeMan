@@ -258,8 +258,8 @@ The `channel` parameter lets callers pick channels — exactly the antipattern. 
 ```
 notify(
   message: str,
-  category: str = "status",
-  urgency: Urgency = "ambient",
+  category: str = "completion",
+  urgency: Urgency = "soft",
   context: dict | None = None,
   expires_at: str | None = None,
   actions: list[Action] | None = None,
@@ -267,7 +267,9 @@ notify(
 ) -> {output_id: str}
 ```
 
-`channel` is gone. `category` is added (default "status" since most calls are informational).
+`channel` is gone. `category` is added (default `completion`/`soft` so a
+bare `notify("...")` produces a real-time toast; pass `category="status"`
+explicitly for ambient state changes that should only land in the digest).
 
 A more general primitive sits beneath:
 

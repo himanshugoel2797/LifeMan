@@ -428,12 +428,14 @@ async def _execute_tool(
             )
             outputs_emitted = ts.outputs_emitted
 
-    # Auto-emit a completion output for user-initiated invocations that didn't
+    # Auto-emit a completion output for human-facing invocations that didn't
     # surface anything themselves. Without this, a tool that just returns a
     # dict (e.g. {"greeting": "hello"}) is invisible — the result lives on the
-    # invocation detail page but never reaches a notification channel. Only
-    # fires for `source == "user"`: tool-to-tool and scheduled runs stay quiet.
-    if source == "user" and outputs_emitted == 0 and not result.get("error"):
+    # invocation detail page but never reaches a notification channel.
+    # Fires for `user` (manual UI/API invokes) and `schedule:*` (scheduled
+    # fires the user explicitly set up); tool-to-tool calls stay quiet.
+    auto_emit = source == "user" or source == "schedule"
+    if auto_emit and outputs_emitted == 0 and not result.get("error"):
         try:
             from lifeman.outputs import emit_output
             from lifeman.outputs.models import StructuredContent

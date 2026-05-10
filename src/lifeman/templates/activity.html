@@ -197,7 +197,11 @@ function applyFilter() {
 applyFilter();
 
 // Subscribe to SSE for live updates. The bus already emits invocation_started/completed.
-const evt = new EventSource('/events');
+const evt = new EventSource(
+    window.LIFEMAN_TOKEN
+        ? `/events?token=${encodeURIComponent(window.LIFEMAN_TOKEN)}`
+        : '/events'
+);
 evt.addEventListener('invocation_started', (e) => {
     const inv = JSON.parse(e.data);
     inv.status = 'running';

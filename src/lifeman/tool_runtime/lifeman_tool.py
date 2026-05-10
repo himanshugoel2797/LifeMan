@@ -99,8 +99,8 @@ def invoke(tool: str, args: dict | None = None, reason: str = "") -> dict:
 
 def notify(
     message: str,
-    category: str = "status",
-    urgency: str = "ambient",
+    category: str = "completion",
+    urgency: str = "soft",
     reason: str = "",
     expires_at: str | None = None,
     context: dict | None = None,
@@ -109,7 +109,43 @@ def notify(
 
     The router decides which channel(s) carry the event — never specify a
     channel. Use `emit_output` directly for structured content or actions.
+
+    Pick `category` to match the *intent* of the message; that determines
+    where the user actually sees it under the default routing rules:
+
+      - "completion"          → transient toast (default). One-shot "done"
+                                messages. Most `notify` calls want this.
+      - "progress"            → transient toast. Long-running task updates.
+      - "query"               → transient toast. System asks a question;
+                                normally pair with `actions` via emit_output.
+      - "alert"               → toast AND sticks in the persistent panel.
+                                "Something needs attention soon."
+      - "reminder"            → sticks in the persistent panel until
+                                dismissed. No toast.
+      - "intervention" + urgency="persistent"
+                              → sticks in the persistent panel and toasts.
+                                Used for nudges that should not be missed.
+      - "status"              → digest only. Silent in real time. Use for
+                                ambient state changes a human doesn't need
+                                to react to right now.
+      - "permission_request"  → toast only. Reserved for capability prompts.
+      - any category, urgency="urgent"
+                              → fans out to every installed channel.
+
+    `urgency` is orthogonal: `ambient` (no interruption), `soft` (one
+    transient surface), `persistent` (stays until acknowledged), `urgent`
+    (escalate everywhere). The default `soft` matches a single toast.
+
+    Unmatched (category, urgency) combinations either ask the LLM router
+    to pick channels or fall back to the digest — so non-canonical values
+    may be silent in real time. Stick to the categories above unless you
+    know what you're doing.
     """
+    if not isinstance(message, str):
+        raise TypeError(
+            f"notify(message=...) must be a string, got {type(message).__name__}; "
+            "use emit_output() for structured content"
+        )
     return _c().call(
         "notify",
         message=message,
@@ -137,6 +173,13 @@ def emit_output(
     image_url, markdown}. `actions` is a list of {label, invoke_tool,
     invoke_args, confirmation_required}. The router chooses channels —
     don't pick channels here.
+
+    See `notify` for what each `category` value means in terms of where
+    the event surfaces (toast, persistent panel, digest, etc.). Note the
+    defaults differ from `notify`: `emit_output` defaults to
+    `status`/`ambient`, which is **digest-only** — pass an explicit
+    `category` (e.g. `completion`, `alert`, `reminder`) when you want
+    real-time visibility.
     """
     return _c().call(
         "emit_output",
