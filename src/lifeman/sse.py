@@ -74,9 +74,17 @@ class EventBus:
                 {**m, "seq": s} for s, m in self._replay
                 if since_seq is None or s > since_seq
             ]
+            sync_seq = self._seq
         try:
             for m in replay:
                 yield m
+            # Sync boundary: tells the client "everything before this is
+            # historical replay; events after are live." Browser pages use
+            # this to suppress reload-on-event handlers during initial
+            # catch-up — without it, a `tool_registered` event in the
+            # replay buffer triggers a reload, which re-subscribes, which
+            # gets the same event again, ad infinitum.
+            yield {"event": "sse.sync", "data": {"seq": sync_seq}, "seq": sync_seq}
             while True:
                 msg = await sub.queue.get()
                 if sub.dropped:

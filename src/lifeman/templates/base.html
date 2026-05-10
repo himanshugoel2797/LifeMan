@@ -477,6 +477,30 @@
         .toast.ok { border-color: var(--success); color: var(--success); }
         dl.kv { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; font-size: 13px; }
         dl.kv dt { color: var(--text-dim); }
+        .terminal-card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .terminal-status {
+            font-size: 11px;
+            color: var(--text-dim);
+            padding: 4px 10px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+        }
+        .terminal-status.ok { color: var(--success); }
+        .terminal-status.err { color: var(--danger); }
+        .terminal {
+            /* xterm.js needs a definite host size for FitAddon to compute
+               cols/rows. The 70vh cap keeps long sessions scrollable inside
+               the page rather than pushing the toolbar offscreen. */
+            height: 70vh;
+            padding: 6px 8px;
+        }
     </style>
 </head>
 <body>
@@ -508,13 +532,49 @@
         </main>
     </div>
     <script>
-        // SSE for real-time updates
-        const evtSource = new EventSource('/events');
+        // SSE for real-time updates.
+        //
+        // Cursor handling: the bus replays its in-memory ring buffer to every
+        // fresh subscriber. A reload-on-event handler that fires during that
+        // replay would re-subscribe → re-receive the same event → reload
+        // forever. To avoid that, we
+        //   (a) pass `?since_seq=N` on (re)connect using the cursor we
+        //       persisted in sessionStorage, and
+        //   (b) suppress reload handlers until we've seen the `sse.sync`
+        //       boundary the bus emits after the initial replay.
+        // sessionStorage scopes the cursor to this tab so different tabs can
+        // catch up independently.
+        const SSE_CURSOR_KEY = 'lifemanSseSeq';
+        let sseReplayDone = false;
+        const sseUrl = (() => {
+            const stored = sessionStorage.getItem(SSE_CURSOR_KEY);
+            return stored ? `/events?since_seq=${encodeURIComponent(stored)}` : '/events';
+        })();
+        const evtSource = new EventSource(sseUrl);
+
+        function _sseUpdateCursor(e) {
+            try {
+                const data = JSON.parse(e.data || '{}');
+                if (typeof data._seq === 'number' && data._seq > 0) {
+                    sessionStorage.setItem(SSE_CURSOR_KEY, String(data._seq));
+                }
+            } catch (_) { /* ignore */ }
+        }
+
+        evtSource.addEventListener('sse.sync', (e) => {
+            _sseUpdateCursor(e);
+            sseReplayDone = true;
+        });
+
         evtSource.addEventListener('permission_requested', (e) => {
+            _sseUpdateCursor(e);
+            if (!sseReplayDone) return;
             // Reload permissions badge
             location.reload();
         });
         evtSource.addEventListener('tool_registered', (e) => {
+            _sseUpdateCursor(e);
+            if (!sseReplayDone) return;
             if (window.location.pathname === '/tools' || window.location.pathname === '/') {
                 location.reload();
             }

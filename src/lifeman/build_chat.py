@@ -1,93 +1,31 @@
-"""Wrap the Claude Code CLI as a build-chat backend.
+"""Per-session workspace for the Claude Code build chat.
 
-Each lifeman build session corresponds to one Claude Code session. We manage
-the Claude session id ourselves so resume works deterministically across
-multiple turns. Before every turn we refresh `CLAUDE.md` in the per-session
-workspace so Claude Code's automatic project-context loader has the current
-list of installed tools, their manifests, and the lifeman tool contract.
-Output is parsed as `--output-format stream-json`, and we yield assistant
-text deltas plus structured tool-use / result events.
+Each lifeman build session corresponds to one Claude Code session running in
+a per-session workspace under `~/.lifeman/build_workspaces/<sid>`. We refresh
+`CLAUDE.md` in the workspace before every (re)attach so Claude Code's
+project-context loader sees the current registry of installed tools and the
+contract for new tools.
 
-Permissions are pre-allowed for the obvious safe surface (file edits inside
-the workspace, plus a small set of safe Bash patterns). Anything Claude tries
-beyond that comes back as a denied tool_result; we detect those, derive a
-permission spec (e.g. `Bash(curl:*)`), and yield a `permission_denied` event
-so the chat layer can surface it to the user. Once the user grants it via
-the lifeman permissions API, the next turn picks the spec up from the
-permissions table and writes it into the workspace's `settings.local.json`.
+The actual conversation runs as a real interactive Claude Code TUI streamed
+to the browser through `lifeman.build_terminal`. This module no longer wraps
+`--print` / stream-json — it only owns the workspace lifecycle, the
+CLAUDE.md generator, and the helpers that read finished tool artifacts back
+out for registration.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import dedent
-from typing import AsyncIterator
 
 from lifeman.config import settings
 from lifeman.db import get_db
 
 log = logging.getLogger(__name__)
-
-
-# Capability + grantee shape used when persisting build-chat tool grants.
-# A grant is keyed by `claude_tool` capability and a per-session `grantee` of
-# `build_chat:<session_id>`; the spec lives in scope.spec (e.g. "Bash(curl:*)").
-PERMISSION_CAPABILITY = "claude_tool"
-
-
-def permission_grantee(session_id: str) -> str:
-    return f"build_chat:{session_id}"
-
-
-# Pre-allowed specs — these are the "obvious" permissions every build session
-# gets without ever prompting the user. File edits + the workspace dir + a
-# small set of read-only / introspection Bash commands. Anything mutating
-# outside the workspace (rm, git push, curl, etc.) still requires explicit
-# user approval.
-SAFE_TOOLS: tuple[str, ...] = (
-    "Read",
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "Glob",
-    "Grep",
-    "LS",
-    "NotebookEdit",
-    "NotebookRead",
-    "TodoWrite",
-)
-SAFE_BASH_PATTERNS: tuple[str, ...] = (
-    "Bash(mkdir:*)",
-    "Bash(ls:*)",
-    "Bash(cat:*)",
-    "Bash(head:*)",
-    "Bash(tail:*)",
-    "Bash(touch:*)",
-    "Bash(echo:*)",
-    "Bash(pwd:*)",
-    "Bash(true:*)",
-    "Bash(test:*)",
-    "Bash(python:*)",
-    "Bash(python3:*)",
-    "Bash(uv:*)",
-    "Bash(pytest:*)",
-    "Bash(jq:*)",
-    "Bash(file:*)",
-    "Bash(stat:*)",
-    "Bash(wc:*)",
-    "Bash(grep:*)",
-    "Bash(find:*)",
-)
-
-
-def default_allowed_specs() -> list[str]:
-    return list(SAFE_TOOLS) + list(SAFE_BASH_PATTERNS)
 
 
 BUILD_SYSTEM_PROMPT = dedent(
@@ -131,114 +69,6 @@ def workspace_for(session_id: str) -> Path:
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "out").mkdir(exist_ok=True)
     return ws
-
-
-# ---------------------------------------------------------------------------
-# Permission spec derivation + workspace settings.local.json management
-# ---------------------------------------------------------------------------
-
-# Tokens that frequently lead a Bash command but aren't the actual program
-# (env-var assignments, sudo-style wrappers, redirection prefix). When we see
-# them we step past to the next token so `FOO=1 curl ...` still grants
-# `Bash(curl:*)`. The list is intentionally tiny — no need to be clever here.
-_BASH_LEAD_NOISE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+$")
-
-
-def _bash_program(command: str) -> str | None:
-    for tok in command.strip().split():
-        if _BASH_LEAD_NOISE.match(tok):
-            continue
-        # Strip any path prefix so /usr/bin/curl → curl.
-        return tok.rsplit("/", 1)[-1]
-    return None
-
-
-def derive_permission_spec(name: str, tool_input: dict) -> str:
-    """Map a denied tool_use to a Claude Code permission spec.
-
-    For `Bash`, we infer the program from `input.command` and grant
-    `Bash(<prog>:*)` so future invocations of the same program go through. If
-    the command is unparseable, we fall back to the bare tool name (less
-    targeted, but still functional).
-    """
-    if name == "Bash":
-        cmd = ""
-        if isinstance(tool_input, dict):
-            cmd = str(tool_input.get("command") or "")
-        prog = _bash_program(cmd)
-        if prog:
-            return f"Bash({prog}:*)"
-    return name
-
-
-async def session_grant_specs(session_id: str) -> list[str]:
-    """Return every claude_tool spec currently granted to this build session."""
-    db = await get_db()
-    now = datetime.now(timezone.utc).isoformat()
-    rows = await db.execute_fetchall(
-        """SELECT scope_json FROM permissions
-           WHERE grantee = ? AND capability = ?
-                 AND revoked_at IS NULL
-                 AND (expires_at IS NULL OR expires_at > ?)""",
-        (permission_grantee(session_id), PERMISSION_CAPABILITY, now),
-    )
-    out: list[str] = []
-    for r in rows:
-        try:
-            scope = json.loads(r["scope_json"]) if r["scope_json"] else {}
-        except json.JSONDecodeError:
-            continue
-        spec = scope.get("spec") if isinstance(scope, dict) else None
-        if isinstance(spec, str) and spec:
-            out.append(spec)
-    return out
-
-
-async def write_workspace_settings(session_id: str) -> Path:
-    """Refresh `<workspace>/.claude/settings.local.json` with current grants.
-
-    Per-turn refresh keeps the file in sync with the lifeman permissions
-    table without requiring a server restart or any mid-stream coordination.
-    """
-    ws = workspace_for(session_id)
-    claude_dir = ws / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    granted = await session_grant_specs(session_id)
-    # Defaults are already passed on the CLI, but listing them in
-    # settings.local.json too is harmless and keeps the file readable for
-    # anyone debugging a workspace by hand.
-    allow = default_allowed_specs() + granted
-    target = claude_dir / "settings.local.json"
-    target.write_text(json.dumps({"permissions": {"allow": allow}}, indent=2))
-    return target
-
-
-# ---------------------------------------------------------------------------
-# Permission-denial detection
-# ---------------------------------------------------------------------------
-
-# Substrings (case-insensitive) Claude Code uses when a tool is blocked by
-# the allow/ask/deny rules. We don't have a typed signal for "permission
-# denied" in the stream-json output, so we sniff the tool_result text. The
-# patterns are intentionally broad so a phrasing change in the CLI doesn't
-# silently break the forwarding flow.
-_DENIAL_HINTS = (
-    "requested permissions",
-    "user has not approved",
-    "user did not approve",
-    "permission denied",
-    "permission to use",
-    "not allowed by",
-    "doesn't want to take this action",
-    "do not have permission",
-)
-
-
-def looks_like_permission_denial(summary: str) -> bool:
-    if not summary:
-        return False
-    s = summary.lower()
-    return any(h in s for h in _DENIAL_HINTS)
 
 
 # ---------------------------------------------------------------------------
@@ -450,223 +280,6 @@ def cleanup_workspace(session_id: str) -> None:
     ws = settings.get_build_workspace_dir() / session_id
     if ws.exists():
         shutil.rmtree(ws, ignore_errors=True)
-
-
-async def stream_build_turn(
-    session_id: str,
-    external_id: str | None,
-    user_message: str,
-) -> AsyncIterator[dict]:
-    """Run one Claude Code turn and stream parsed events.
-
-    Yields:
-        {"type": "external_id", "value": "..."}        # new claude session id (first turn only)
-        {"type": "delta", "text": "..."}               # assistant text delta
-        {"type": "tool_use", "id": "...", "name": "...", "input": {...}}
-        {"type": "tool_result", "id": "...", "ok": True, "summary": "..."}
-        {"type": "permission_denied", "id": "...", "name": "...", "input": {...}, "spec": "..."}
-        {"type": "done", "result": "..."}
-        {"type": "error", "message": "..."}
-    """
-    cli = settings.claude_cli
-    if not shutil.which(cli) and not Path(cli).exists():
-        yield {
-            "type": "error",
-            "message": (
-                f"Claude CLI '{cli}' not found on PATH. Install Claude Code or set "
-                f"LIFEMAN_CLAUDE_CLI to its absolute path."
-            ),
-        }
-        return
-
-    workspace = workspace_for(session_id)
-
-    # Refresh CLAUDE.md so Claude Code's project-context loader sees the current
-    # registry state before this turn runs.
-    try:
-        await refresh_workspace_context(session_id)
-    except Exception:
-        log.exception("failed to refresh CLAUDE.md")
-
-    # Refresh the workspace's `.claude/settings.local.json` so any permission
-    # the user granted between turns becomes effective for this one. Defaults
-    # are passed on the CLI as well — settings.local.json layers on top.
-    try:
-        await write_workspace_settings(session_id)
-    except Exception:
-        log.exception("failed to refresh workspace settings.local.json")
-
-    granted_specs = await session_grant_specs(session_id)
-
-    # On the first turn, let Claude pick its own session id. We learn the id
-    # from the `system` init event in the stream and yield it back to the
-    # caller (which persists it for subsequent --resume calls). Pre-generating
-    # the id and forcing it via --session-id risked silently joining another
-    # process's session if a uuid ever collided or the CLI rejected pre-set
-    # ids; reading the canonical id from Claude's own output sidesteps that.
-    is_first = external_id is None
-
-    args: list[str] = [
-        cli,
-        "--print",
-        "--output-format", "stream-json",
-        "--verbose",
-        "--permission-mode", "acceptEdits",
-        "--append-system-prompt", BUILD_SYSTEM_PROMPT,
-    ]
-    # Pre-allow the safe surface plus anything the user has explicitly granted
-    # for this session. `--allowedTools` is variadic — pass each spec as its
-    # own arg so we don't need to worry about quoting/escape rules.
-    args.append("--allowedTools")
-    args.extend(default_allowed_specs())
-    args.extend(granted_specs)
-    if not is_first:
-        args += ["--resume", external_id]
-    args += [user_message]
-
-    log.info(
-        "build_chat: spawning claude (resume=%s, cwd=%s)",
-        external_id if not is_first else None,
-        workspace,
-    )
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(workspace),
-        )
-    except FileNotFoundError as e:
-        yield {"type": "error", "message": f"failed to spawn claude: {e}"}
-        return
-
-    # Stream stdout line by line and parse JSON events. The first `system`
-    # event carries the canonical session_id; on the first turn we forward it
-    # as an `external_id` event so the caller can persist it for resume.
-    #
-    # We also track in-flight tool_uses by id so that when a tool_result comes
-    # back denied, we can re-derive the original tool name + input and emit
-    # a `permission_denied` event with a Claude-Code-style spec attached.
-    seen_session_id: str | None = None
-    in_flight: dict[str, dict] = {}
-    assert proc.stdout is not None
-    async for raw in proc.stdout:
-        line = raw.decode(errors="replace").strip()
-        if not line:
-            continue
-        try:
-            evt = json.loads(line)
-        except json.JSONDecodeError:
-            log.debug("build_chat: non-JSON line: %s", line[:200])
-            continue
-
-        # Forward the session id from Claude's init metadata. We trust whatever
-        # the CLI tells us — if it differs from the id we passed via --resume,
-        # treat the new one as authoritative (the CLI may have created a new
-        # session under us if resume failed).
-        sid = evt.get("session_id")
-        if isinstance(sid, str) and sid and sid != seen_session_id:
-            seen_session_id = sid
-            if sid != external_id:
-                yield {"type": "external_id", "value": sid}
-
-        async for parsed in _parse_event(evt):
-            ptype = parsed.get("type")
-            if ptype == "tool_use":
-                tid = parsed.get("id") or ""
-                if tid:
-                    in_flight[tid] = {
-                        "name": parsed.get("name", ""),
-                        "input": parsed.get("input") or {},
-                    }
-                yield parsed
-            elif ptype == "tool_result":
-                yield parsed
-                if not parsed.get("ok") and looks_like_permission_denial(
-                    parsed.get("summary", "")
-                ):
-                    tid = parsed.get("id") or ""
-                    use = in_flight.get(tid) or {}
-                    name = use.get("name") or ""
-                    tool_input = use.get("input") or {}
-                    spec = derive_permission_spec(name, tool_input)
-                    yield {
-                        "type": "permission_denied",
-                        "id": tid,
-                        "name": name,
-                        "input": tool_input,
-                        "spec": spec,
-                        "summary": parsed.get("summary", ""),
-                    }
-                # Result for this id has been observed; drop the use record.
-                in_flight.pop(parsed.get("id") or "", None)
-            else:
-                yield parsed
-
-    rc = await proc.wait()
-    if rc != 0:
-        stderr = b""
-        if proc.stderr is not None:
-            try:
-                stderr = await proc.stderr.read()
-            except Exception:
-                pass
-        yield {
-            "type": "error",
-            "message": f"claude exited {rc}: {stderr.decode(errors='replace')[:400]}",
-        }
-
-
-async def _parse_event(evt: dict) -> AsyncIterator[dict]:
-    """Translate one Claude Code stream-json event into our event vocabulary."""
-    etype = evt.get("type")
-
-    if etype == "assistant":
-        msg = evt.get("message") or {}
-        for block in msg.get("content") or []:
-            btype = block.get("type")
-            if btype == "text":
-                text = block.get("text") or ""
-                if text:
-                    yield {"type": "delta", "text": text}
-            elif btype == "tool_use":
-                yield {
-                    "type": "tool_use",
-                    "id": block.get("id", ""),
-                    "name": block.get("name", ""),
-                    "input": block.get("input") or {},
-                }
-
-    elif etype == "user":
-        # tool_result blocks come back as user-role messages
-        msg = evt.get("message") or {}
-        for block in msg.get("content") or []:
-            if block.get("type") == "tool_result":
-                content = block.get("content")
-                if isinstance(content, list):
-                    summary = "".join(
-                        (c.get("text") or "") for c in content if isinstance(c, dict)
-                    )
-                else:
-                    summary = str(content) if content is not None else ""
-                yield {
-                    "type": "tool_result",
-                    "id": block.get("tool_use_id", ""),
-                    "ok": not block.get("is_error", False),
-                    "summary": summary[:400],
-                }
-
-    elif etype == "result":
-        # Final terminator; payload contains the full assistant result text
-        yield {"type": "done", "result": evt.get("result", "")}
-
-    elif etype == "system":
-        # init / metadata; ignore
-        return
-
-    elif etype == "error":
-        yield {"type": "error", "message": evt.get("message", "claude error")}
 
 
 def list_workspace_tools(session_id: str) -> list[dict]:

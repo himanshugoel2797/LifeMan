@@ -1,10 +1,14 @@
 """Chat sessions API.
 
 Two surfaces:
-  * `live_chat`   — streams from the local Ollama server, with internal tool calls.
-  * `build_chat`  — wraps the Claude Code CLI for tool authoring.
+  * `live_chat`   — streams from the local Ollama server, with internal tool
+    calls. Uses POST + SSE.
+  * `build_chat`  — runs the real interactive Claude Code TUI under a PTY,
+    bridged to the browser as a WebSocket. POST is rejected for these
+    sessions; the browser opens
+    /api/chat/sessions/{id}/terminal directly.
 
-Streaming uses Server-Sent Events. We emit:
+The live-chat SSE protocol emits:
     event: delta      data: {"text": "..."}
     event: tool_call  data: {"name": "...", "args": {...}}
     event: tool_result data: {"name": "...", "ok": true, "summary": "..."}
@@ -20,16 +24,16 @@ import uuid
 from datetime import datetime, timezone
 
 import aiosqlite
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from sse_starlette.sse import EventSourceResponse
 
 from lifeman import audit, ollama_supervisor
-from lifeman.auth import require_auth
+from lifeman.auth import check_token, require_auth
 from lifeman.build_chat import (
     list_workspace_tools,
     read_workspace_tool,
-    stream_build_turn,
 )
+from lifeman.build_terminal import run_terminal_session
 from lifeman.chat_tools import dispatch as dispatch_tool
 from lifeman.chat_tools import tool_specs
 from lifeman.config import settings
@@ -156,16 +160,77 @@ async def send_message(
     if session.get("archived_at"):
         raise HTTPException(400, "session is archived")
 
+    if session["surface"] == "build_chat":
+        # Build chat runs as a real interactive TUI over a WebSocket; the
+        # POST + SSE flow does not apply. The browser should connect to
+        # /api/chat/sessions/{id}/terminal instead. Reject *before* writing
+        # the user message so a misrouted POST doesn't leave an orphaned
+        # row in the chat history.
+        raise HTTPException(
+            409,
+            "build_chat sessions are interactive — connect the WebSocket at "
+            f"/api/chat/sessions/{session_id}/terminal instead",
+        )
+
     await _append_message(session_id, "user", body.content)
 
     if session["surface"] == "live_chat":
         generator = _stream_live(session_id, request)
-    elif session["surface"] == "build_chat":
-        generator = _stream_build(session_id, body.content, request)
     else:
         raise HTTPException(400, f"unsupported surface '{session['surface']}'")
 
     return EventSourceResponse(generator)
+
+
+@router.websocket("/sessions/{session_id}/terminal")
+async def build_chat_terminal(websocket: WebSocket, session_id: str):
+    """Bridge a build_chat session to a real interactive Claude Code TUI.
+
+    Auth: bearer token via the `?token=` query parameter (browsers can't
+    set custom headers on WebSocket handshakes). The same lifeman token
+    that gates HTTP requests is required.
+    """
+    token = websocket.query_params.get("token", "")
+    if not check_token(token):
+        await websocket.close(code=4401)  # 4xxx = app-defined; 4401 ~ "auth"
+        return
+
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT * FROM sessions WHERE id = ?", (session_id,)
+    )
+    if not rows:
+        await websocket.close(code=4404)
+        return
+    session = dict(rows[0])
+    if session["surface"] != "build_chat":
+        await websocket.close(code=4400)
+        return
+    if session.get("archived_at"):
+        await websocket.close(code=4423)  # locked
+        return
+
+    await websocket.accept()
+    try:
+        await run_terminal_session(websocket, session_id)
+    except Exception as e:  # noqa: BLE001
+        log.exception("build_chat terminal crashed")
+        # Surface the exception text to the browser pane before closing so
+        # the user has a chance to see what went wrong. The WS may already
+        # be in CLOSING state if the failure happened mid-cleanup, so we
+        # gate the send on connection state and swallow secondary errors.
+        try:
+            from starlette.websockets import WebSocketState
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.send_text(
+                    f"\r\n[lifeman] terminal crashed: {type(e).__name__}: {e}\r\n"
+                )
+        except Exception:
+            pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -336,95 +401,6 @@ async def _append_message(
     return mid
 
 
-async def _set_external_id(session_id: str, external_id: str) -> None:
-    db = await get_db()
-    await db.execute(
-        "UPDATE sessions SET external_id = ? WHERE id = ?",
-        (external_id, session_id),
-    )
-    await db.commit()
-
-
-async def _open_build_permission_request(
-    session_id: str,
-    name: str,
-    tool_input: dict,
-    spec: str,
-    summary: str,
-) -> str:
-    """Create a permission_requests row for a denied Claude Code tool call.
-
-    The grantee is `build_chat:<session_id>` so a grant is scoped to this one
-    session — granting Bash(curl:*) here doesn't leak into other build chats
-    or into core lifeman tools. The spec lives in scope.spec; build_chat
-    reads it back before the next turn to write settings.local.json.
-    """
-    from lifeman.build_chat import (
-        PERMISSION_CAPABILITY,
-        permission_grantee,
-    )
-    from lifeman.permissions_runtime import find_matching_grant
-    from lifeman.sse import bus as sse_bus
-
-    db = await get_db()
-    requester = permission_grantee(session_id)
-    scope = {
-        "requester": requester,
-        "session_id": session_id,
-        "tool": name,
-        "spec": spec,
-        # Re-derived on resolve so a future grant matcher can look up by spec.
-        "args_match": {"spec": spec},
-    }
-    reason = _format_permission_reason(name, tool_input, summary)
-
-    matching = await find_matching_grant(requester, PERMISSION_CAPABILITY, scope)
-    now = datetime.now(timezone.utc).isoformat()
-    initial_status = "granted_always" if matching else "pending"
-
-    req_id = str(uuid.uuid4())[:12]
-    await db.execute(
-        """INSERT INTO permission_requests (id, requester, capability, scope_json, reason, status, requested_at, resolved_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (req_id, requester, "claude_tool", json.dumps(scope), reason,
-         initial_status, now, now if matching else None),
-    )
-    await db.commit()
-
-    if not matching:
-        await audit.log(
-            source=requester,
-            action="request_permission",
-            target="claude_tool",
-            args_summary=f"spec={spec}",
-            reason=reason,
-        )
-        await sse_bus.publish("permission_requested", {
-            "id": req_id,
-            "requester": requester,
-            "capability": "claude_tool",
-            "reason": reason,
-        })
-    return req_id
-
-
-def _format_permission_reason(name: str, tool_input: dict, summary: str) -> str:
-    """Human-readable one-liner describing what Claude tried to do."""
-    if name == "Bash":
-        cmd = ""
-        if isinstance(tool_input, dict):
-            cmd = str(tool_input.get("command") or "")
-        if cmd:
-            return f"build_chat tried to run: {cmd[:200]}"
-    if isinstance(tool_input, dict) and tool_input:
-        # Pick the most informative single field if there is one.
-        for k in ("url", "file_path", "path", "pattern", "query"):
-            v = tool_input.get(k)
-            if isinstance(v, str) and v:
-                return f"build_chat tried {name}({k}={v[:160]})"
-    return f"build_chat tried to use {name}"
-
-
 async def _load_history_for_llm(session_id: str) -> list[dict]:
     """Build OpenAI-style messages from stored chat history."""
     db = await get_db()
@@ -545,112 +521,3 @@ async def _stream_live(session_id: str, request: Request):
         yield {"event": "done", "data": json.dumps({"message_id": last_message_id})}
 
 
-async def _stream_build(session_id: str, user_message: str, request: Request):
-    """Run one Claude Code turn, persist the assistant transcript when done."""
-    db = await get_db()
-    rows = await db.execute_fetchall(
-        "SELECT external_id FROM sessions WHERE id = ?", (session_id,)
-    )
-    external_id = dict(rows[0]).get("external_id") if rows else None
-
-    text_buf: list[str] = []
-    structured_events: list[dict] = []  # tool_use / tool_result for transcript
-
-    try:
-        async for evt in stream_build_turn(session_id, external_id, user_message):
-            if await request.is_disconnected():
-                return
-            etype = evt.get("type")
-
-            if etype == "external_id":
-                await _set_external_id(session_id, evt["value"])
-
-            elif etype == "delta":
-                text = evt.get("text", "")
-                if text:
-                    text_buf.append(text)
-                    yield {"event": "delta", "data": json.dumps({"text": text})}
-
-            elif etype == "tool_use":
-                structured_events.append(evt)
-                yield {
-                    "event": "tool_call",
-                    "data": json.dumps({
-                        "id": evt.get("id", ""),
-                        "name": evt["name"],
-                        "args": evt.get("input") or {},
-                    }),
-                }
-
-            elif etype == "tool_result":
-                structured_events.append(evt)
-                yield {
-                    "event": "tool_result",
-                    "data": json.dumps({
-                        "id": evt.get("id", ""),
-                        "name": "claude_tool",
-                        "ok": evt.get("ok", True),
-                        "summary": evt.get("summary", ""),
-                    }),
-                }
-
-            elif etype == "permission_denied":
-                # Open a permission request bound to this build session and
-                # forward it to the chat client. The client renders inline
-                # Allow Once / Always / Deny buttons; on Allow Always, the
-                # next turn writes the spec into the workspace's
-                # settings.local.json and Claude can use it.
-                req_id = await _open_build_permission_request(
-                    session_id=session_id,
-                    name=evt.get("name", ""),
-                    tool_input=evt.get("input") or {},
-                    spec=evt.get("spec", ""),
-                    summary=evt.get("summary", ""),
-                )
-                yield {
-                    "event": "permission_required",
-                    "data": json.dumps({
-                        "request_id": req_id,
-                        "tool_use_id": evt.get("id", ""),
-                        "name": evt.get("name", ""),
-                        "spec": evt.get("spec", ""),
-                        "args": evt.get("input") or {},
-                    }),
-                }
-
-            elif etype == "done":
-                final = evt.get("result") or "".join(text_buf)
-                if not text_buf and final:
-                    yield {"event": "delta", "data": json.dumps({"text": final})}
-                    text_buf.append(final)
-                mid = await _append_message(
-                    session_id,
-                    "assistant",
-                    "".join(text_buf),
-                    tool_calls=structured_events or None,
-                )
-                yield {"event": "done", "data": json.dumps({"message_id": mid})}
-                return
-
-            elif etype == "error":
-                yield {"event": "error", "data": json.dumps({"message": evt.get("message", "")})}
-                yield {"event": "done", "data": json.dumps({"message_id": None})}
-                return
-
-        # Stream ended without an explicit done event — persist whatever we got.
-        if text_buf or structured_events:
-            mid = await _append_message(
-                session_id,
-                "assistant",
-                "".join(text_buf),
-                tool_calls=structured_events or None,
-            )
-            yield {"event": "done", "data": json.dumps({"message_id": mid})}
-        else:
-            yield {"event": "error", "data": json.dumps({"message": "claude produced no output"})}
-            yield {"event": "done", "data": json.dumps({"message_id": None})}
-
-    except Exception as e:  # noqa: BLE001
-        log.exception("build chat crashed")
-        yield {"event": "error", "data": json.dumps({"message": f"{type(e).__name__}: {e}"})}
-        yield {"event": "done", "data": json.dumps({"message_id": None})}

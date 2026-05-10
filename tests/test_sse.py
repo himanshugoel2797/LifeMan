@@ -59,6 +59,35 @@ async def test_late_subscriber_with_no_cursor_gets_full_replay():
 
 
 @pytest.mark.asyncio
+async def test_sync_event_marks_end_of_replay():
+    """After the replay batch, the bus emits an `sse.sync` event with the
+    current high-water seq so clients can tell when they're caught up. This
+    is what suppresses reload-on-event handlers during initial catch-up,
+    which used to deadlock the page in a reload loop."""
+    bus = EventBus()
+    await bus.publish("a", {})
+    await bus.publish("b", {})
+    gen = bus.subscribe()
+    msgs = await _drain(gen, 3)
+    assert [m["event"] for m in msgs] == ["a", "b", "sse.sync"]
+    assert msgs[-1]["data"] == {"seq": 2}
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sync_event_fires_even_with_empty_replay():
+    """A subscriber with `since_seq` past the buffer (or one that connects
+    before any publish) still gets an `sse.sync` so the client always has
+    a deterministic boundary."""
+    bus = EventBus()
+    gen = bus.subscribe(since_seq=999)
+    [first] = await _drain(gen, 1)
+    assert first["event"] == "sse.sync"
+    assert first["data"] == {"seq": 0}
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
 async def test_drops_surface_via_sse_dropped_event():
     """When a subscriber's queue overflows, a synthetic `sse.dropped` event
     must be yielded next so the UI can render a 'you missed N events' banner."""
