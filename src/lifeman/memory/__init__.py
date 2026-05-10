@@ -25,7 +25,7 @@ from lifeman.memory.models import (
     MemoryEvent,
     RecordMemoryResponse,
 )
-from lifeman.memory.router import builtin_route
+from lifeman.memory.router import NEEDS_REVIEW_RULE, builtin_route
 from lifeman.routing.domain import RoutingDomain
 from lifeman.routing.engine import create_engine
 
@@ -100,7 +100,15 @@ async def record_memory(
     if decision.expired:
         return RecordMemoryResponse(event_id=event_id, expired=True)
 
-    ok, dropped = await engine.dispatch_all(event, decision)
+    # If the router flagged needs_review, dispatch with an augmented copy
+    # of the event rather than letting the router mutate the caller's
+    # event in place — preserves the caller's view and avoids cross-handler
+    # leaks if a future router fans out to multiple handlers.
+    dispatch_event = event
+    if NEEDS_REVIEW_RULE in decision.matched_rules and "needs_review" not in event.tags:
+        dispatch_event = event.model_copy(update={"tags": list(event.tags) + ["needs_review"]})
+
+    ok, dropped = await engine.dispatch_all(dispatch_event, decision)
     await audit.log(
         source=source or "system",
         action="record_memory",

@@ -9,13 +9,18 @@ Default policy:
 
 Note: an earlier version dropped private+untagged events on the floor, but
 that left tool authors with no signal that their memory disappeared. Now we
-store the event with a `needs_review` tag so the user can audit it.
+store the event with a `needs_review` tag so the user can audit it. The
+matched_rules entry `20` is the signal — record_memory inspects the decision
+and dispatches with an augmented event copy rather than the router mutating
+the caller's event in place.
 """
 
 from __future__ import annotations
 
 from lifeman.memory.models import MemoryEvent
 from lifeman.routing.event import HandlerManifest, RoutingDecision, is_expired
+
+NEEDS_REVIEW_RULE = 20
 
 
 async def builtin_route(
@@ -38,9 +43,7 @@ async def builtin_route(
     elif event.sensitivity == "private" and not event.tags:
         pick = "memory_store"
         notes = "private without tags — flagged needs_review"
-        decision.matched_rules = [20]
-        # Mutate the event in place so the writer persists the review tag.
-        event.tags = list(event.tags) + ["needs_review"]
+        decision.matched_rules = [NEEDS_REVIEW_RULE]
     elif event.type_hint in (None, "", "episodic", "semantic", "identity", "summary"):
         pick = "memory_store"
         decision.matched_rules = [30]
