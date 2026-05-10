@@ -150,6 +150,77 @@
         return { block, head, body };
     };
 
+    /** Render Allow Once / Allow Always / Deny buttons inside a tool-block
+     * after build-chat reports a permission denial. The action POSTs to the
+     * standard /api/permissions/{id}/resolve endpoint; on Allow Always the
+     * spec is persisted into the workspace's settings.local.json for the
+     * next turn. We don't auto-retry — the user re-prompts Claude. */
+    const attachPermissionPrompt = (ref, info) => {
+        if (!ref) {
+            // No tool block to anchor to — fall back to a free-floating
+            // permission card at the end of the assistant message.
+            ref = { block: null, body: null };
+            const fallback = document.createElement('div');
+            fallback.className = 'tool-block err';
+            stream.lastElementChild.appendChild(fallback);
+            ref.block = fallback;
+            ref.body = fallback;
+        }
+        const wrap = document.createElement('div');
+        wrap.className = 'permission-prompt';
+        const label = document.createElement('div');
+        label.className = 'label';
+        label.textContent = 'permission required';
+        wrap.appendChild(label);
+        const detail = document.createElement('div');
+        detail.style.marginBottom = '6px';
+        detail.textContent = 'Spec: ' + (info.spec || info.name || '?');
+        wrap.appendChild(detail);
+        const btns = document.createElement('div');
+        btns.className = 'btn-group';
+        const mkBtn = (text, action, klass) => {
+            const b = document.createElement('button');
+            b.className = 'btn ' + (klass || '');
+            b.type = 'button';
+            b.textContent = text;
+            b.addEventListener('click', async () => {
+                btns.querySelectorAll('button').forEach(x => x.disabled = true);
+                try {
+                    const r = await fetch(`/api/permissions/${info.request_id}/resolve`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': authHeader(),
+                        },
+                        body: JSON.stringify({ action }),
+                    });
+                    if (r.ok) {
+                        wrap.innerHTML = '';
+                        const done = document.createElement('div');
+                        done.className = 'reason';
+                        done.textContent = action === 'deny'
+                            ? 'denied'
+                            : (action === 'allow_always'
+                                ? 'allowed for this session — re-prompt Claude to retry'
+                                : 'allowed once — re-prompt Claude to retry');
+                        wrap.appendChild(done);
+                    } else {
+                        btns.querySelectorAll('button').forEach(x => x.disabled = false);
+                    }
+                } catch (e) {
+                    btns.querySelectorAll('button').forEach(x => x.disabled = false);
+                }
+            });
+            return b;
+        };
+        btns.appendChild(mkBtn('Allow Once', 'allow_once', 'btn-success'));
+        btns.appendChild(mkBtn('Allow Always', 'allow_always', 'btn-success'));
+        btns.appendChild(mkBtn('Deny', 'deny', 'btn-danger'));
+        wrap.appendChild(btns);
+        ref.body.appendChild(wrap);
+        scrollToEnd();
+    };
+
     const finishToolBlock = (ref, ok, summary) => {
         if (!ref) return;
         ref.block.classList.add(ok ? 'ok' : 'err');
@@ -229,6 +300,8 @@
             }
 
             const pendingTools = [];   // FIFO of currently-open tool blocks
+            const toolById = new Map(); // id → block ref (for build_chat)
+            const lastFinishedById = new Map(); // id → block ref (for permission_required)
             for await (const evt of parseSSE(r)) {
                 let data = {};
                 try { data = JSON.parse(evt.data || '{}'); } catch (e) {}
@@ -239,10 +312,24 @@
                 } else if (evt.event === 'tool_call') {
                     const args = data.args !== undefined ? data.args
                         : (data.args_raw ? data.args_raw : null);
-                    pendingTools.push(startToolBlock(body.parentElement, data.name || 'tool', args));
+                    const ref = startToolBlock(body.parentElement, data.name || 'tool', args);
+                    pendingTools.push(ref);
+                    if (data.id) toolById.set(data.id, ref);
                 } else if (evt.event === 'tool_result') {
-                    const ref = pendingTools.shift();
+                    let ref = data.id ? toolById.get(data.id) : null;
+                    if (!ref) ref = pendingTools.shift();
+                    else {
+                        const ix = pendingTools.indexOf(ref);
+                        if (ix >= 0) pendingTools.splice(ix, 1);
+                    }
                     finishToolBlock(ref, !!data.ok, data.summary);
+                    if (data.id) {
+                        toolById.delete(data.id);
+                        lastFinishedById.set(data.id, ref);
+                    }
+                } else if (evt.event === 'permission_required') {
+                    let ref = data.tool_use_id ? lastFinishedById.get(data.tool_use_id) : null;
+                    attachPermissionPrompt(ref, data);
                 } else if (evt.event === 'error') {
                     appendToolEvent(body.parentElement, '[error] ' + (data.message || ''));
                 } else if (evt.event === 'done') {

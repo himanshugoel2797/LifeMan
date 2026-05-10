@@ -345,6 +345,86 @@ async def _set_external_id(session_id: str, external_id: str) -> None:
     await db.commit()
 
 
+async def _open_build_permission_request(
+    session_id: str,
+    name: str,
+    tool_input: dict,
+    spec: str,
+    summary: str,
+) -> str:
+    """Create a permission_requests row for a denied Claude Code tool call.
+
+    The grantee is `build_chat:<session_id>` so a grant is scoped to this one
+    session — granting Bash(curl:*) here doesn't leak into other build chats
+    or into core lifeman tools. The spec lives in scope.spec; build_chat
+    reads it back before the next turn to write settings.local.json.
+    """
+    from lifeman.build_chat import (
+        PERMISSION_CAPABILITY,
+        permission_grantee,
+    )
+    from lifeman.permissions_runtime import find_matching_grant
+    from lifeman.sse import bus as sse_bus
+
+    db = await get_db()
+    requester = permission_grantee(session_id)
+    scope = {
+        "requester": requester,
+        "session_id": session_id,
+        "tool": name,
+        "spec": spec,
+        # Re-derived on resolve so a future grant matcher can look up by spec.
+        "args_match": {"spec": spec},
+    }
+    reason = _format_permission_reason(name, tool_input, summary)
+
+    matching = await find_matching_grant(requester, PERMISSION_CAPABILITY, scope)
+    now = datetime.now(timezone.utc).isoformat()
+    initial_status = "granted_always" if matching else "pending"
+
+    req_id = str(uuid.uuid4())[:12]
+    await db.execute(
+        """INSERT INTO permission_requests (id, requester, capability, scope_json, reason, status, requested_at, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (req_id, requester, "claude_tool", json.dumps(scope), reason,
+         initial_status, now, now if matching else None),
+    )
+    await db.commit()
+
+    if not matching:
+        await audit.log(
+            source=requester,
+            action="request_permission",
+            target="claude_tool",
+            args_summary=f"spec={spec}",
+            reason=reason,
+        )
+        await sse_bus.publish("permission_requested", {
+            "id": req_id,
+            "requester": requester,
+            "capability": "claude_tool",
+            "reason": reason,
+        })
+    return req_id
+
+
+def _format_permission_reason(name: str, tool_input: dict, summary: str) -> str:
+    """Human-readable one-liner describing what Claude tried to do."""
+    if name == "Bash":
+        cmd = ""
+        if isinstance(tool_input, dict):
+            cmd = str(tool_input.get("command") or "")
+        if cmd:
+            return f"build_chat tried to run: {cmd[:200]}"
+    if isinstance(tool_input, dict) and tool_input:
+        # Pick the most informative single field if there is one.
+        for k in ("url", "file_path", "path", "pattern", "query"):
+            v = tool_input.get(k)
+            if isinstance(v, str) and v:
+                return f"build_chat tried {name}({k}={v[:160]})"
+    return f"build_chat tried to use {name}"
+
+
 async def _load_history_for_llm(session_id: str) -> list[dict]:
     """Build OpenAI-style messages from stored chat history."""
     db = await get_db()
@@ -495,7 +575,11 @@ async def _stream_build(session_id: str, user_message: str, request: Request):
                 structured_events.append(evt)
                 yield {
                     "event": "tool_call",
-                    "data": json.dumps({"name": evt["name"], "args": evt.get("input") or {}}),
+                    "data": json.dumps({
+                        "id": evt.get("id", ""),
+                        "name": evt["name"],
+                        "args": evt.get("input") or {},
+                    }),
                 }
 
             elif etype == "tool_result":
@@ -503,9 +587,34 @@ async def _stream_build(session_id: str, user_message: str, request: Request):
                 yield {
                     "event": "tool_result",
                     "data": json.dumps({
+                        "id": evt.get("id", ""),
                         "name": "claude_tool",
                         "ok": evt.get("ok", True),
                         "summary": evt.get("summary", ""),
+                    }),
+                }
+
+            elif etype == "permission_denied":
+                # Open a permission request bound to this build session and
+                # forward it to the chat client. The client renders inline
+                # Allow Once / Always / Deny buttons; on Allow Always, the
+                # next turn writes the spec into the workspace's
+                # settings.local.json and Claude can use it.
+                req_id = await _open_build_permission_request(
+                    session_id=session_id,
+                    name=evt.get("name", ""),
+                    tool_input=evt.get("input") or {},
+                    spec=evt.get("spec", ""),
+                    summary=evt.get("summary", ""),
+                )
+                yield {
+                    "event": "permission_required",
+                    "data": json.dumps({
+                        "request_id": req_id,
+                        "tool_use_id": evt.get("id", ""),
+                        "name": evt.get("name", ""),
+                        "spec": evt.get("spec", ""),
+                        "args": evt.get("input") or {},
                     }),
                 }
 
