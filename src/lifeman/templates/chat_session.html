@@ -72,7 +72,7 @@
     const form = document.getElementById('composer');
     const input = document.getElementById('input');
     const sendBtn = document.getElementById('send-btn');
-    const token = window.LIFEMAN_TOKEN;
+    const authHeader = () => 'Bearer ' + (window.LIFEMAN_TOKEN || '');
 
     const scrollToEnd = () => { stream.scrollTop = stream.scrollHeight; };
     scrollToEnd();
@@ -109,7 +109,8 @@
         scrollToEnd();
     };
 
-    /** Parse SSE-formatted text from a fetch() ReadableStream. */
+    /** Parse SSE-formatted text from a fetch() ReadableStream.
+     * sse-starlette emits CRLF line endings, so we normalize to \n before splitting. */
     async function* parseSSE(response) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -117,10 +118,15 @@
         while (true) {
             const { value, done } = await reader.read();
             if (done) {
-                if (buf.trim()) yield parseFrame(buf);
+                buf = buf.replace(/\r\n/g, '\n');
+                for (const frame of buf.split('\n\n')) {
+                    if (frame.trim()) yield parseFrame(frame);
+                }
                 return;
             }
             buf += decoder.decode(value, { stream: true });
+            // Normalize so a single frame separator (\n\n) splits both LF and CRLF streams.
+            buf = buf.replace(/\r\n/g, '\n');
             let idx;
             while ((idx = buf.indexOf('\n\n')) >= 0) {
                 const frame = buf.slice(0, idx);
@@ -133,6 +139,7 @@
     function parseFrame(frame) {
         const out = { event: 'message', data: '' };
         for (const line of frame.split('\n')) {
+            if (line.startsWith(':')) continue;            // SSE comment / keep-alive
             if (line.startsWith('event:')) out.event = line.slice(6).trim();
             else if (line.startsWith('data:')) out.data += line.slice(5).trim();
         }
@@ -154,7 +161,7 @@
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + token,
+                    'Authorization': authHeader(),
                     'Accept': 'text/event-stream',
                 },
                 body: JSON.stringify({ content }),

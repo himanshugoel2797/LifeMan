@@ -67,7 +67,7 @@ document.getElementById('new-session-btn').addEventListener('click', async () =>
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + (window.LIFEMAN_TOKEN || prompt('Bearer token:')),
+            'Authorization': 'Bearer ' + (window.LIFEMAN_TOKEN || ''),
         },
         body: JSON.stringify({ surface: '{{ surface }}' }),
     });

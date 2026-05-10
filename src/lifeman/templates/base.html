@@ -5,6 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}lifeman{% endblock %}</title>
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script>
+        // Local-only server: inject the bearer token so browser fetch() can call /api/.
+        // This must run in <head> before any body-level scripts read it.
+        window.LIFEMAN_TOKEN = "{{ api_token | default('') }}";
+    </script>
     <style>
         :root {
             --bg: #0a0a0f;
@@ -345,7 +350,6 @@
         </main>
     </div>
     <script>
-        window.LIFEMAN_TOKEN = "{{ api_token | default('') }}";
         // SSE for real-time updates
         const evtSource = new EventSource('/events');
         evtSource.addEventListener('permission_requested', (e) => {
