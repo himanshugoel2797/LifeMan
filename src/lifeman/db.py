@@ -387,6 +387,48 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
 
+-- ---------------------------------------------------------------------------
+-- Output router rule proposals.
+-- When the LLM fallback picks channels for an unmatched (category, urgency)
+-- combo, the decision is cached here so the user can promote frequently-seen
+-- picks into a permanent rule. Per OUTPUT_DESIGN.MD §"Build sequence" step 8.
+-- `hit_count` is incremented when the same combo + channel-set repeats.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS output_rule_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL,
+    urgency TEXT NOT NULL,
+    channels_json TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    accepted_at TEXT,
+    dismissed_at TEXT,
+    notes TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_rule_proposals_category_urgency
+    ON output_rule_proposals(category, urgency);
+
+-- ---------------------------------------------------------------------------
+-- LLM usage accounting. One row per inference call (live chat turn, build
+-- chat turn, router LLM pick). Captured from the `usage` object the
+-- OpenAI-compatible server returns; rows are absent when the server doesn't
+-- report usage. Sum / group as needed via /api/system/usage.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    surface TEXT NOT NULL,                     -- live_chat | build_chat | output_router | api
+    session_id TEXT,
+    model TEXT NOT NULL DEFAULT '',
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_created ON llm_usage(created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_surface ON llm_usage(surface);
+
 CREATE INDEX IF NOT EXISTS idx_invocations_tool ON invocations(tool);
 CREATE INDEX IF NOT EXISTS idx_invocations_started ON invocations(started_at);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);

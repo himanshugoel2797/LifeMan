@@ -7,16 +7,21 @@ GET    /api/outputs                  list recent events (newest first)
 GET    /api/outputs/{id}             one event with delivery + audit detail
 GET    /api/outputs/channels         list installed channels with manifests
 GET    /api/outputs/rules            list current routing rules
+GET    /api/outputs/rule-proposals   LLM-fallback picks pending review
+POST   /api/outputs/rule-proposals/{id}/accept   promote into a real rule
+DELETE /api/outputs/rule-proposals/{id}          dismiss
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from lifeman.auth import require_auth
 from lifeman.db import get_db
+from lifeman.models import OkResponse
 from lifeman.outputs import api as outputs_api
 from lifeman.outputs.models import (
     EmitOutputRequest,
@@ -100,6 +105,110 @@ async def list_channels(_: str = Depends(require_auth)):
 async def list_rules(_: str = Depends(require_auth)):
     rules = await load_rules()
     return [r.model_dump() for r in rules]
+
+
+@router.get("/rule-proposals")
+async def list_rule_proposals(
+    include_resolved: bool = False,
+    min_hits: int = 1,
+    _: str = Depends(require_auth),
+):
+    """Pending LLM-fallback picks the user might want to promote.
+
+    Defaults to pending only (not accepted, not dismissed) and hit_count >= 1.
+    Pass `include_resolved=true` to see accepted/dismissed rows too — useful
+    for spotting decisions that were dismissed but keep coming back.
+    """
+    db = await get_db()
+    if include_resolved:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM output_rule_proposals "
+            "WHERE hit_count >= ? "
+            "ORDER BY hit_count DESC, last_seen_at DESC LIMIT 200",
+            (min_hits,),
+        )
+    else:
+        rows = await db.execute_fetchall(
+            "SELECT * FROM output_rule_proposals "
+            "WHERE accepted_at IS NULL AND dismissed_at IS NULL "
+            "AND hit_count >= ? "
+            "ORDER BY hit_count DESC, last_seen_at DESC LIMIT 200",
+            (min_hits,),
+        )
+    return [
+        {
+            "id": r["id"],
+            "category": r["category"],
+            "urgency": r["urgency"],
+            "channels": json.loads(r["channels_json"]),
+            "hit_count": r["hit_count"],
+            "first_seen_at": r["first_seen_at"],
+            "last_seen_at": r["last_seen_at"],
+            "accepted_at": r["accepted_at"],
+            "dismissed_at": r["dismissed_at"],
+            "notes": r["notes"],
+        }
+        for r in rows
+    ]
+
+
+@router.post("/rule-proposals/{proposal_id}/accept", response_model=OkResponse)
+async def accept_rule_proposal(proposal_id: int, _: str = Depends(require_auth)):
+    """Promote a proposal into a real routing rule.
+
+    Inserts an `output_routing_rules` row whose match is the proposal's
+    (category, urgency) tuple and whose action targets the proposed channels.
+    The proposal row is marked accepted; future routes through this combo will
+    match the new rule and skip the LLM fallback.
+    """
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT * FROM output_rule_proposals WHERE id = ?", (proposal_id,),
+    )
+    if not rows:
+        raise HTTPException(404, "proposal not found")
+    p = dict(rows[0])
+    if p["accepted_at"] is not None:
+        raise HTTPException(400, "proposal already accepted")
+
+    channels = json.loads(p["channels_json"])
+    match = {"category": p["category"], "urgency": p["urgency"]}
+    action = {"channels": channels}
+    # Position 100 sits between the category defaults (10-90) and the
+    # state-override block (200+) so accepted proposals beat defaults but
+    # don't bypass DND/asleep.
+    await db.execute(
+        "INSERT INTO output_routing_rules "
+        "(position, match_json, action_json, description) "
+        "VALUES (100, ?, ?, ?)",
+        (
+            json.dumps(match),
+            json.dumps(action),
+            f"promoted from LLM-fallback proposal #{proposal_id}",
+        ),
+    )
+    await db.execute(
+        "UPDATE output_rule_proposals SET accepted_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), proposal_id),
+    )
+    await db.commit()
+    return OkResponse()
+
+
+@router.delete("/rule-proposals/{proposal_id}", response_model=OkResponse)
+async def dismiss_rule_proposal(proposal_id: int, _: str = Depends(require_auth)):
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT id FROM output_rule_proposals WHERE id = ?", (proposal_id,),
+    )
+    if not rows:
+        raise HTTPException(404, "proposal not found")
+    await db.execute(
+        "UPDATE output_rule_proposals SET dismissed_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), proposal_id),
+    )
+    await db.commit()
+    return OkResponse()
 
 
 @router.get("/{output_id}")

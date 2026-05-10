@@ -30,12 +30,18 @@ async def stream_chat(
         {"content": "..."}                              # token
         {"tool_calls": [{"index": 0, "id": "...", ...}]} # tool-call fragment
         {"finish_reason": "stop" | "tool_calls"}        # final marker
+        {"usage": {"prompt_tokens": N, "completion_tokens": M,
+                    "total_tokens": K, "model": "..."}}  # if backend reports it
     """
+    chosen_model = model or settings.llm_model
     payload = {
-        "model": model or settings.llm_model,
+        "model": chosen_model,
         "messages": messages,
         "stream": True,
         "temperature": temperature,
+        # Ask OpenAI-compatible servers to include usage in the final chunk.
+        # Ollama honours this from 0.5+; older builds ignore it silently.
+        "stream_options": {"include_usage": True},
     }
     if tools:
         payload["tools"] = tools
@@ -58,8 +64,23 @@ async def stream_chat(
                         chunk = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    # `usage` may arrive in a trailing chunk that has no
+                    # `choices`. Surface it before falling through.
+                    usage = chunk.get("usage")
+                    if usage:
+                        yield {
+                            "usage": {
+                                "prompt_tokens": usage.get("prompt_tokens"),
+                                "completion_tokens": usage.get("completion_tokens"),
+                                "total_tokens": usage.get("total_tokens"),
+                                "model": chunk.get("model") or chosen_model,
+                            }
+                        }
                     choices = chunk.get("choices") or []
                     if not choices:
+                        if usage:
+                            # Final usage-only chunk — end of stream.
+                            return
                         continue
                     choice = choices[0]
                     delta = choice.get("delta") or {}

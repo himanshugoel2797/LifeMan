@@ -83,7 +83,8 @@ Tables, grouped:
   the calling tool run).
 - **Schedules:** `schedules` (one row per recurring or one-shot).
 - **Output domain:** `output_events`, `output_channels`,
-  `output_deliveries`, `output_routing_audit`, `output_routing_rules`.
+  `output_deliveries`, `output_routing_audit`, `output_routing_rules`,
+  `output_rule_proposals` (LLM-fallback picks waiting for promotion).
 - **Input domain:** `input_events`, `input_routing_audit`,
   `input_dispatches`.
 - **Memory domain:** `memory_events`, `memory_routing_audit`,
@@ -94,6 +95,8 @@ Tables, grouped:
 - **Secrets:** `secrets`, `secret_access_log`.
 - **Chat:** `sessions`, `messages`.
 - **Build queue:** `build_requests`.
+- **LLM accounting:** `llm_usage` (one row per inference call with
+  `surface`, `session_id`, prompt/completion/total tokens, latency).
 
 Memory tier: a single `memories` table written by the built-in
 `memory_store` handler; the design's "memory tool owns its schema"
@@ -117,9 +120,10 @@ Endpoints in one place:
 | tools | `POST /api/tools` | register tool |
 | tools | `GET /api/tools` | list active tools |
 | tools | `GET /api/tools/{id}` | tool detail (manifest, schemas, code) |
-| tools | `POST /api/tools/{id}/invoke` / `POST /api/tools/invoke` | run tool |
+| tools | `POST /api/tools/{id}/invoke` / `POST /api/tools/invoke` | run tool (sync) |
+| tools | `POST /api/tools/invoke_async` | spawn in background; returns invocation_id |
 | tools | `GET /api/tools/invocations` | cross-cutting invocation feed |
-| tools | `GET /api/tools/invocations/{id}` | one invocation |
+| tools | `GET /api/tools/invocations/{id}` | one invocation (poll for async result) |
 | tools | `POST /api/tools/{id}/deprecate` | retire tool |
 | permissions | `POST /api/permissions/request` | open or auto-grant by scope match |
 | permissions | `GET /api/permissions/pending` | inbox |
@@ -135,6 +139,8 @@ Endpoints in one place:
 | outputs | `POST /api/outputs/{id}/cancel` / `…/respond` | cancel + report response |
 | outputs | `GET /api/outputs` / `GET /api/outputs/{id}` | history + audit detail |
 | outputs | `GET /api/outputs/channels` / `GET /api/outputs/rules` | introspection |
+| outputs | `GET /api/outputs/rule-proposals` | LLM-fallback picks pending review |
+| outputs | `POST /api/outputs/rule-proposals/{id}/accept` / `DELETE …` | promote / dismiss |
 | inputs | `POST /api/inputs` | ingest |
 | inputs | `GET /api/inputs` / `GET /api/inputs/{id}` | history + audit |
 | memory | `POST /api/memory` | record_memory |
@@ -160,7 +166,10 @@ Endpoints in one place:
 | build-requests | `POST /api/build-requests` | queue work for build chat |
 | build-requests | `GET /api/build-requests` / `GET /api/build-requests/{id}` | list / get |
 | build-requests | `DELETE /api/build-requests/{id}` | cancel |
-| system | `GET /api/system/status` | uptime, counts |
+| system | `GET /api/system/status` | uptime, counts, 24h LLM usage |
+| system | `GET /api/system/usage` | LLM usage rows + totals (filter by surface/session/since) |
+| system | `GET /api/system/backups` / `POST /api/system/backups` | list / create encrypted snapshots |
+| system | `POST /api/system/backups/restore` | restore from a snapshot (requires `confirm`) |
 | system | `GET /api/audit` | query audit_log |
 | system | `GET /api/user/status` | placeholder |
 | system | `GET /api/now` / `POST /api/sleep` | utilities (auth-gated) |
@@ -192,7 +201,7 @@ loop:
    browser can leave the "thinking" state.
 
 The tool surface visible to the LLM is in `chat_tools.SPECS` — about
-35 functions covering scheduling, invocation (sync + lookup by id),
+36 functions covering scheduling, invocation (sync, async, lookup by id),
 output emission, memory (record/recall + get/update/forget/forget_matching),
 observations, inputs, permissions (request/list/revoke), system queries.
 

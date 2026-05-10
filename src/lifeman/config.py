@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     claude_cli: str = "claude"
     build_workspace_dir: Path | None = None  # defaults to data_dir/build_workspaces
 
+    # Backups. The SQLite file is snapshotted with VACUUM INTO and encrypted
+    # with the master key; the master key itself must be backed up separately.
+    backup_dir: Path | None = None              # defaults to data_dir/backups
+    backup_enabled: bool = True
+    backup_interval_hours: float = 24.0         # 0 disables the scheduled task
+    backup_retention_count: int = 14            # keep the N most-recent files
+
     def get_db_path(self) -> Path:
         return self.db_path or (self.data_dir / "data.db")
 
@@ -57,6 +64,9 @@ class Settings(BaseSettings):
 
     def get_build_workspace_dir(self) -> Path:
         return self.build_workspace_dir or (self.data_dir / "build_workspaces")
+
+    def get_backup_dir(self) -> Path:
+        return self.backup_dir or (self.data_dir / "backups")
 
 
 settings = Settings()

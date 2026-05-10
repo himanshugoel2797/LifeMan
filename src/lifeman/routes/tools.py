@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -273,6 +274,21 @@ async def invoke_tool_by_name(body: InvokeRequest, _: str = Depends(require_auth
     )
 
 
+@router.post("/invoke_async", response_model=InvokeResponse)
+async def invoke_tool_async(body: InvokeRequest, _: str = Depends(require_auth)):
+    """Spawn a tool invocation in the background; return its id immediately.
+
+    The caller polls `GET /api/tools/invocations/{id}` (or the `get_invocation`
+    MCP tool) for the final status. Use this when a tool takes longer than the
+    caller wants to block on — long-running scrapes, ML inference, slow
+    network fetches — or when the caller wants to schedule work and forget.
+    """
+    invocation_id = await _spawn_invocation(
+        body.tool, body.args, source="user", reason=body.reason,
+    )
+    return InvokeResponse(invocation_id=invocation_id, status="running")
+
+
 @router.get("/invocations/{invocation_id}", response_model=Invocation)
 async def get_invocation(invocation_id: str, _: str = Depends(require_auth)):
     db = await get_db()
@@ -307,6 +323,97 @@ async def deprecate_tool(tool_id: str, _: str = Depends(require_auth)):
     return {"ok": True}
 
 
+async def _spawn_invocation(
+    tool_name: str,
+    args: dict,
+    *,
+    source: str = "user",
+    reason: str = "",
+    session_id: str | None = None,
+    parent_invocation_id: str | None = None,
+) -> str:
+    """Pre-insert a `running` invocation row, then run `_execute_tool` in the
+    background and update the row when it completes.
+
+    Returns the invocation id immediately. Pollers see status='running' until
+    the background task transitions it to ok/error.
+
+    Why pre-insert before backgrounding? So a fast `get_invocation` call right
+    after this returns sees the row (rather than a 404). `_execute_tool`
+    detects the pre-existing row and reuses its id instead of double-creating.
+    """
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT id FROM tools WHERE name = ?", (tool_name,),
+    )
+    if not rows:
+        # Mirror the sync path: create an error row immediately so the
+        # caller's polling lands on a real, terminal record.
+        inv_id = str(uuid.uuid4())[:12]
+        now = datetime.now(timezone.utc).isoformat()
+        err = f"Tool '{tool_name}' not found"
+        await db.execute(
+            """INSERT INTO invocations
+               (id, tool, args_json, source, started_at, finished_at,
+                session_id, parent_invocation_id, reason, status, error,
+                result_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'error', ?, ?)""",
+            (
+                inv_id, tool_name, json.dumps(args), source, now, now,
+                session_id, parent_invocation_id, reason, err,
+                json.dumps({"error": err}),
+            ),
+        )
+        await db.commit()
+        return inv_id
+
+    inv_id = str(uuid.uuid4())[:12]
+    now = datetime.now(timezone.utc).isoformat()
+    await db.execute(
+        """INSERT INTO invocations
+           (id, tool, args_json, source, started_at, session_id,
+            parent_invocation_id, reason, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running')""",
+        (
+            inv_id, tool_name, json.dumps(args), source, now,
+            session_id, parent_invocation_id, reason,
+        ),
+    )
+    await db.commit()
+    await bus.publish("invocation_started", {
+        "id": inv_id, "tool": tool_name, "source": source,
+        "session_id": session_id, "parent_invocation_id": parent_invocation_id,
+        "reason": reason, "started_at": now,
+    })
+
+    async def _runner():
+        try:
+            await _execute_tool(
+                tool_name, args, source=source, reason=reason,
+                session_id=session_id,
+                parent_invocation_id=parent_invocation_id,
+                _existing_invocation_id=inv_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("async invocation %s crashed outside _execute_tool", inv_id)
+            err = f"{type(e).__name__}: {e}"
+            finished = datetime.now(timezone.utc).isoformat()
+            try:
+                _db = await get_db()
+                await _db.execute(
+                    "UPDATE invocations SET error = ?, finished_at = ?, "
+                    "status = 'error', result_json = ? WHERE id = ? "
+                    "AND finished_at IS NULL",
+                    (err, finished, json.dumps({"error": err}), inv_id),
+                )
+                await _db.commit()
+            except Exception:  # noqa: BLE001
+                log.exception("failed to record crash for invocation %s", inv_id)
+
+    asyncio.create_task(_runner())
+    return inv_id
+
+
 async def _execute_tool(
     tool_name: str,
     args: dict,
@@ -316,14 +423,22 @@ async def _execute_tool(
     session_id: str | None = None,
     parent_invocation_id: str | None = None,
     fire_id: str | None = None,
+    _existing_invocation_id: str | None = None,
 ) -> dict:
-    """Core tool execution logic used by API, scheduler, chat, and tool-side API."""
+    """Core tool execution logic used by API, scheduler, chat, and tool-side API.
+
+    When `_existing_invocation_id` is set, the function takes over a row that
+    `_spawn_invocation` pre-inserted: skips both the row-creation step and the
+    `invocation_started` SSE publish, then updates the same row when it
+    finishes. Validation failures still record an error transition on that
+    row so async callers see the same shape as sync ones.
+    """
     db = await get_db()
 
     # Look up tool
     rows = await db.execute_fetchall("SELECT * FROM tools WHERE name = ?", (tool_name,))
     if not rows:
-        return {"error": f"Tool '{tool_name}' not found", "_invocation_id": ""}
+        return {"error": f"Tool '{tool_name}' not found", "_invocation_id": _existing_invocation_id or ""}
     tool = dict(rows[0])
 
     # Load manifest + input schema from the latest version.
@@ -360,21 +475,32 @@ async def _execute_tool(
 
     # Create invocation record. If validation failed, record it as a finished
     # error in a single INSERT so observers never see a transient `running`.
-    inv_id = str(uuid.uuid4())[:12]
+    # When called from `_spawn_invocation`, a row already exists — reuse it.
+    inv_id = _existing_invocation_id or str(uuid.uuid4())[:12]
     now = datetime.now(timezone.utc).isoformat()
     if validation_error is not None:
-        await db.execute(
-            """INSERT INTO invocations
-               (id, tool, args_json, source, started_at, finished_at,
-                schedule_id, session_id, parent_invocation_id, reason,
-                status, error, result_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'error', ?, ?)""",
-            (
-                inv_id, tool_name, json.dumps(args), source, now, now,
-                schedule_id, session_id, parent_invocation_id, reason,
-                validation_error, json.dumps({"error": validation_error}),
-            ),
-        )
+        if _existing_invocation_id is not None:
+            await db.execute(
+                """UPDATE invocations
+                     SET error = ?, finished_at = ?, status = 'error',
+                         result_json = ?
+                   WHERE id = ?""",
+                (validation_error, now,
+                 json.dumps({"error": validation_error}), inv_id),
+            )
+        else:
+            await db.execute(
+                """INSERT INTO invocations
+                   (id, tool, args_json, source, started_at, finished_at,
+                    schedule_id, session_id, parent_invocation_id, reason,
+                    status, error, result_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'error', ?, ?)""",
+                (
+                    inv_id, tool_name, json.dumps(args), source, now, now,
+                    schedule_id, session_id, parent_invocation_id, reason,
+                    validation_error, json.dumps({"error": validation_error}),
+                ),
+            )
         await db.commit()
         await audit.log(
             source=source, action="invoke_tool", target=tool_name,
@@ -390,23 +516,31 @@ async def _execute_tool(
         })
         return {"error": validation_error, "_invocation_id": inv_id}
 
-    await db.execute(
-        """INSERT INTO invocations
-           (id, tool, args_json, source, started_at, schedule_id, session_id,
-            parent_invocation_id, reason, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')""",
-        (
-            inv_id, tool_name, json.dumps(args), source, now, schedule_id,
-            session_id, parent_invocation_id, reason,
-        ),
-    )
-    await db.commit()
-    await bus.publish("invocation_started", {
-        "id": inv_id, "tool": tool_name, "source": source,
-        "session_id": session_id, "schedule_id": schedule_id,
-        "parent_invocation_id": parent_invocation_id,
-        "reason": reason, "started_at": now,
-    })
+    if _existing_invocation_id is None:
+        await db.execute(
+            """INSERT INTO invocations
+               (id, tool, args_json, source, started_at, schedule_id, session_id,
+                parent_invocation_id, reason, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')""",
+            (
+                inv_id, tool_name, json.dumps(args), source, now, schedule_id,
+                session_id, parent_invocation_id, reason,
+            ),
+        )
+        await db.commit()
+        await bus.publish("invocation_started", {
+            "id": inv_id, "tool": tool_name, "source": source,
+            "session_id": session_id, "schedule_id": schedule_id,
+            "parent_invocation_id": parent_invocation_id,
+            "reason": reason, "started_at": now,
+        })
+    elif schedule_id is not None:
+        # The pre-inserted row didn't know about schedule_id; backfill it.
+        await db.execute(
+            "UPDATE invocations SET schedule_id = ? WHERE id = ?",
+            (schedule_id, inv_id),
+        )
+        await db.commit()
 
     # Run in sandbox, behind a per-invocation tool-side API socket.
     tool_dir = settings.get_tools_dir() / tool["id"]

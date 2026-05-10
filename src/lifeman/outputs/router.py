@@ -234,6 +234,8 @@ async def route(event: OutputEvent, *, user_state: dict | None = None) -> Routin
         if llm_pick is not None:
             base_channels = llm_pick
             decision.notes = f"no rule matched; LLM picked {llm_pick}"
+            # Cache as a rule proposal so the user can review and promote.
+            await _record_rule_proposal(event.category, event.urgency, llm_pick)
         else:
             base_channels = ["digest"]
             decision.notes = "no rule matched; defaulted to digest"
@@ -338,14 +340,25 @@ async def _llm_pick_channels(event: OutputEvent) -> list[str] | None:
 
     try:
         text_parts: list[str] = []
+        usage: dict | None = None
+        import time as _time
+        started_ms = _time.monotonic() * 1000
         async def _consume():
+            nonlocal usage
             async for delta in stream_chat(messages, temperature=0.0):
                 if "content" in delta and delta["content"]:
                     text_parts.append(delta["content"])
+                if "usage" in delta:
+                    usage = delta["usage"]
                 if delta.get("finish_reason"):
                     return
         await asyncio.wait_for(_consume(), timeout=settings.output_router_llm_timeout)
         text = "".join(text_parts).strip()
+        from lifeman.usage import record_usage
+        await record_usage(
+            usage, surface="output_router",
+            latency_ms=int(_time.monotonic() * 1000 - started_ms),
+        )
     except (LLMError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
         log.info("router LLM fallback unavailable: %s", e)
         return None
@@ -371,6 +384,43 @@ async def _llm_pick_channels(event: OutputEvent) -> list[str] | None:
         # digest channel so the event is still recorded for the morning brief.
         return ["digest"] if "digest" in available else []
     return picked
+
+
+async def _record_rule_proposal(
+    category: str, urgency: str, channels: list[str],
+) -> None:
+    """Record (or bump) a proposal row for this LLM pick.
+
+    If a non-dismissed proposal for the same (category, urgency, channels)
+    already exists, bump its hit count and last_seen_at. Otherwise, insert a
+    new row. Errors here never block the actual delivery path.
+    """
+    try:
+        db = await get_db()
+        key = json.dumps(sorted(channels))
+        now = datetime.now(timezone.utc).isoformat()
+        existing = await db.execute_fetchall(
+            "SELECT id FROM output_rule_proposals "
+            "WHERE category = ? AND urgency = ? AND channels_json = ? "
+            "AND dismissed_at IS NULL AND accepted_at IS NULL",
+            (category, urgency, key),
+        )
+        if existing:
+            await db.execute(
+                "UPDATE output_rule_proposals SET hit_count = hit_count + 1, "
+                "last_seen_at = ? WHERE id = ?",
+                (now, existing[0]["id"]),
+            )
+        else:
+            await db.execute(
+                "INSERT INTO output_rule_proposals "
+                "(category, urgency, channels_json, hit_count, "
+                "first_seen_at, last_seen_at) VALUES (?, ?, ?, 1, ?, ?)",
+                (category, urgency, key, now, now),
+            )
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("failed to record output rule proposal")
 
 
 async def _rate_limited(name: str, channel) -> bool:

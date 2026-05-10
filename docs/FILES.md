@@ -42,6 +42,17 @@ REVIEW.md.
   effects. `compute_initial_fires_at` parses every accepted `when`
   form and is the single source of "next-occurrence" logic;
   `_compute_next_fire` is a thin wrapper that delegates to it.
+- [`backup.py`](src/lifeman/backup.py) — `create_backup` /
+  `restore_backup` / `list_backups`. Uses SQLite `VACUUM INTO` for a
+  consistent snapshot, then AES-256-GCM-encrypts with the master key
+  (`LFMBKP01` magic + nonce prefix). A background loop in `start_scheduled_backups`
+  fires every `LIFEMAN_BACKUP_INTERVAL_HOURS` and prunes to the last
+  `LIFEMAN_BACKUP_RETENTION_COUNT` files.
+- [`usage.py`](src/lifeman/usage.py) — `record_usage(usage, surface,
+  session_id, latency_ms)` — single insert helper for the `llm_usage`
+  table. Called from `routes/chat._stream_live`,
+  `inputs/handlers._drive_background_turn`, and
+  `outputs/router._llm_pick_channels`. No-op on missing usage.
 - [`sandbox.py`](src/lifeman/sandbox.py) — bubblewrap launcher.
   `run_tool` either runs the tool's `run.py` directly (sandbox
   disabled / no bwrap) or builds an isolated bubblewrap environment
@@ -128,9 +139,11 @@ REVIEW.md.
   exit reason. The workspace-register path keeps `role` and
   `output_channel` manifest fields so build-chat tools can install
   themselves into the routing engine.
-- [`system.py`](src/lifeman/routes/system.py) — `system/status`,
-  `audit`, `user/status`, `now`, `sleep`, plus a minimal
-  `sessions/current` shim distinct from chat sessions.
+- [`system.py`](src/lifeman/routes/system.py) — `system/status`
+  (now includes 24h LLM usage), `system/usage` (rows + totals,
+  filterable by surface/session/since), `system/backups`
+  (list / create / restore), `audit`, `user/status`, `now`, `sleep`,
+  plus a minimal `sessions/current` shim distinct from chat sessions.
 - [`ui.py`](src/lifeman/routes/ui.py) — Jinja2-rendered dashboard,
   tools list + detail, permissions, schedules, chat index + session,
   activity feed, audit log, plus `/events` SSE endpoint

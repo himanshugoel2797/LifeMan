@@ -39,6 +39,7 @@ from lifeman.chat_tools import tool_specs
 from lifeman.config import settings
 from lifeman.db import get_db
 from lifeman.llm import LLMError, merge_tool_call_deltas, stream_chat
+from lifeman.usage import record_usage
 from lifeman.models import (
     ChatMessage,
     ChatSendRequest,
@@ -451,7 +452,10 @@ async def _stream_live(session_id: str, request: Request):
             text_buf: list[str] = []
             tool_calls_accum: list[dict] = []
             finish: str | None = None
+            usage: dict | None = None
 
+            import time as _time
+            turn_started_ms = _time.monotonic() * 1000
             async for delta in stream_chat(messages, tools=specs):
                 if "content" in delta and delta["content"]:
                     text_buf.append(delta["content"])
@@ -460,7 +464,13 @@ async def _stream_live(session_id: str, request: Request):
                     merge_tool_call_deltas(tool_calls_accum, delta["tool_calls"])
                 if "finish_reason" in delta:
                     finish = delta["finish_reason"]
+                if "usage" in delta:
+                    usage = delta["usage"]
 
+            await record_usage(
+                usage, surface="live_chat", session_id=session_id,
+                latency_ms=int(_time.monotonic() * 1000 - turn_started_ms),
+            )
             text = "".join(text_buf)
 
             # Persist this assistant turn

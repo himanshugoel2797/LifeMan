@@ -27,7 +27,9 @@ The core insight: build the smallest system that can build the rest of itself. R
 - **Permission system** — tools request capabilities at runtime; you grant allow-once / allow-always / deny via web UI
 - **Scheduler** — deferred and recurring invocations with editable context resolved at fire time
 - **Audit log** — every mutation logged with source, action, target, and reason
-- **MCP server** — 35 tools exposed to the local LLM (scheduling, tool discovery, permissions, memory CRUD, notifications, observations, inputs)
+- **MCP server** — 36 tools exposed to the local LLM (scheduling, sync + async tool invocation, permissions, memory CRUD, notifications, observations, inputs)
+- **Encrypted backups** — daily `VACUUM INTO` + AES-256-GCM snapshots (master key required to restore)
+- **LLM usage accounting** — every chat turn + router fallback records token counts and latency
 - **Web UI** — dashboard, tool browser, permission prompts, schedule viewer, audit log
 
 ## Stack
@@ -117,6 +119,15 @@ curl -X POST http://localhost:8390/api/schedules \
 | `PATCH` | `/api/memory/{id}` | Update a memory's content/tags |
 | `DELETE` | `/api/memory/{id}` | Forget a single memory |
 | `POST` | `/api/memory/forget_matching` | Pattern-delete (`dry_run` default true) |
+| `POST` | `/api/tools/invoke_async` | Spawn a tool in the background; returns invocation_id |
+| `GET` | `/api/tools/invocations/{id}` | Poll an invocation's status / result |
+| `GET` | `/api/system/usage` | LLM token usage rows + totals (filter by surface/session/since) |
+| `POST` | `/api/system/backups` | Create an encrypted snapshot now |
+| `GET` | `/api/system/backups` | List existing backups (newest first) |
+| `POST` | `/api/system/backups/restore` | Restore from a backup (requires `confirm=true`) |
+| `GET` | `/api/outputs/rule-proposals` | LLM-fallback channel picks pending review |
+| `POST` | `/api/outputs/rule-proposals/{id}/accept` | Promote a proposal into a real routing rule |
+| `DELETE` | `/api/outputs/rule-proposals/{id}` | Dismiss a proposal |
 
 ## MCP Server
 
@@ -150,6 +161,10 @@ All settings can be set via environment variables prefixed with `LIFEMAN_`:
 | `LIFEMAN_OLLAMA_AUTOSTART` | `true` | If true, spawn `ollama serve` on startup when not already running |
 | `LIFEMAN_OLLAMA_STARTUP_TIMEOUT` | `30` | Seconds to wait for Ollama to become healthy |
 | `LIFEMAN_CLAUDE_CLI` | `claude` | Path to Claude Code CLI for build-chat sessions |
+| `LIFEMAN_BACKUP_ENABLED` | `true` | Run the scheduled backup loop |
+| `LIFEMAN_BACKUP_INTERVAL_HOURS` | `24` | Hours between auto-backups (0 disables) |
+| `LIFEMAN_BACKUP_RETENTION_COUNT` | `14` | Keep the N most-recent encrypted snapshots |
+| `LIFEMAN_BACKUP_DIR` | `<data_dir>/backups` | Where snapshots are written |
 
 ## License
 

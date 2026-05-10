@@ -61,6 +61,26 @@ async def _handle_invoke(args: dict, *, session_id: str | None = None) -> dict:
     return result
 
 
+async def _handle_invoke_async(args: dict, *, session_id: str | None = None) -> dict:
+    """Spawn a tool invocation in the background; return its id immediately.
+
+    Pair with `get_invocation` to poll. Use when a tool would block the chat
+    loop longer than the model wants to wait."""
+    from lifeman.routes.tools import _spawn_invocation
+
+    tool = args.get("tool")
+    if not tool:
+        return {"error": "missing 'tool'"}
+    inv_id = await _spawn_invocation(
+        tool,
+        args.get("args") or {},
+        source="llm",
+        reason=args.get("reason", "live_chat:async"),
+        session_id=session_id,
+    )
+    return {"invocation_id": inv_id, "status": "running"}
+
+
 async def _handle_schedule(args: dict) -> dict:
     from lifeman.scheduler import compute_initial_fires_at
 
@@ -653,6 +673,26 @@ SPECS: dict[str, tuple[dict, Callable[[dict], Awaitable[dict]]]] = {
         ),
         _handle_invoke,
     ),
+    "invoke_async": (
+        _fn(
+            "invoke_async",
+            "Like `invoke`, but returns immediately with an invocation_id "
+            "instead of waiting for the tool to finish. Poll with "
+            "`get_invocation(id)` for the result. Use for long-running tools "
+            "(scrapes, ML inference, slow network) where blocking the chat "
+            "loop is undesirable.",
+            {
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string"},
+                    "args": {"type": "object"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["tool", "reason"],
+            },
+        ),
+        _handle_invoke_async,
+    ),
     "schedule": (
         _fn(
             "schedule",
@@ -1119,8 +1159,8 @@ async def dispatch(name: str, raw_args: str, *, session_id: str | None = None) -
         return {"error": "arguments must be a JSON object"}
     _, handler = SPECS[name]
     try:
-        # Only the invoke handler needs session_id today; pass kwarg-aware.
-        if name == "invoke":
+        # Only the invoke handlers need session_id today; pass kwarg-aware.
+        if name in ("invoke", "invoke_async"):
             return await handler(args, session_id=session_id)
         return await handler(args)
     except Exception as e:  # noqa: BLE001 — surface tool errors to the model

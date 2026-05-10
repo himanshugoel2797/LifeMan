@@ -107,7 +107,10 @@ async def _drive_background_turn(session_id: str) -> None:
             text_buf: list[str] = []
             tool_calls_accum: list[dict] = []
             finish: str | None = None
+            usage: dict | None = None
 
+            import time as _time
+            turn_started_ms = _time.monotonic() * 1000
             async for delta in stream_chat(messages, tools=specs):
                 if "content" in delta and delta["content"]:
                     text_buf.append(delta["content"])
@@ -119,7 +122,14 @@ async def _drive_background_turn(session_id: str) -> None:
                     merge_tool_call_deltas(tool_calls_accum, delta["tool_calls"])
                 if "finish_reason" in delta:
                     finish = delta["finish_reason"]
+                if "usage" in delta:
+                    usage = delta["usage"]
 
+            from lifeman.usage import record_usage
+            await record_usage(
+                usage, surface="live_chat", session_id=session_id,
+                latency_ms=int(_time.monotonic() * 1000 - turn_started_ms),
+            )
             text = "".join(text_buf)
             last_message_id = await _append_message(
                 session_id, "assistant", text,
