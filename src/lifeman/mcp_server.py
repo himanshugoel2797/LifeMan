@@ -1,7 +1,17 @@
-"""MCP server exposing lifeman tools to the local LLM.
+"""MCP server exposing lifeman tools to external MCP clients (e.g. Claude
+Desktop) over stdio.
 
-Run standalone: python -m lifeman.mcp_server
-Speaks MCP protocol over stdio transport.
+NOTE — process boundary: this script runs as a separate subprocess. It cannot
+share in-process state (DB connection, asyncio loop, SSE bus) with the main
+lifeman server, so every tool here proxies to the lifeman HTTP API via httpx.
+
+The canonical, in-process tool surface used by the live-chat LLM is
+`lifeman.chat_tools` — when adding a new tool, define it there first and
+mirror it here only if external MCP clients also need access. Phase 2 will
+move this surface inside the main process via MCP-over-HTTP, removing the
+duplication.
+
+Run standalone: `lifeman-mcp` (entry point) or `python -m lifeman.mcp_server`.
 """
 
 from __future__ import annotations

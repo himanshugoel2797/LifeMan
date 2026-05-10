@@ -20,34 +20,42 @@
 
 <h2>Recent Invocations</h2>
 {% if invocations %}
-<table>
-    <thead>
-        <tr>
-            <th>ID</th>
-            <th>Source</th>
-            <th>Started</th>
-            <th>Status</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for inv in invocations %}
-        <tr>
-            <td><code>{{ inv.id }}</code></td>
-            <td><span class="tag">{{ inv.source }}</span></td>
-            <td class="timestamp">{{ inv.started_at[:19] }}</td>
-            <td>
-                {% if inv.error %}
+<div style="display: flex; flex-direction: column; gap: 8px;">
+    {% for inv in invocations %}
+    <details class="card" {% if loop.first %}open{% endif %} style="margin: 0;">
+        <summary style="cursor: pointer; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+            <code style="color: var(--text-dim);">{{ inv.id }}</code>
+            <span class="tag">{{ inv.source }}</span>
+            <span class="timestamp">{{ inv.started_at[:19] }}</span>
+            {% if inv.error %}
                 <span class="tag" style="border-color: var(--danger); color: var(--danger);">error</span>
-                {% elif inv.finished_at %}
+            {% elif inv.finished_at %}
                 <span class="tag tag-success">ok</span>
-                {% else %}
+            {% else %}
                 <span class="tag tag-warning">running</span>
-                {% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+            {% endif %}
+            {% if inv.schedule_id %}
+                <span class="tag">schedule {{ inv.schedule_id }}</span>
+            {% endif %}
+        </summary>
+        <div style="margin-top: 12px;">
+            <div class="reason" style="text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;">args</div>
+            <pre style="margin-top: 4px; max-height: 200px;">{{ inv.args | tojson(indent=2) }}</pre>
+            {% if inv.error %}
+            <div class="reason" style="text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; margin-top: 12px; color: var(--danger);">error</div>
+            <pre style="margin-top: 4px; max-height: 300px; border-color: var(--danger);">{{ inv.error }}</pre>
+            {% endif %}
+            {% if inv.result is not none %}
+            <div class="reason" style="text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; margin-top: 12px;">result</div>
+            <pre style="margin-top: 4px; max-height: 400px;">{{ inv.result | tojson(indent=2) }}</pre>
+            {% endif %}
+            {% if inv.finished_at %}
+            <div class="timestamp" style="margin-top: 8px;">finished {{ inv.finished_at[:19] }}</div>
+            {% endif %}
+        </div>
+    </details>
+    {% endfor %}
+</div>
 {% else %}
 <div class="empty">No invocations yet.</div>
 {% endif %}

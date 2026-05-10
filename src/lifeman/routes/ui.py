@@ -79,10 +79,25 @@ async def tool_detail_page(request: Request, tool_id: str):
         manifest = json.loads(m["manifest_json"])
         code = m["code"]
 
-    invocations = await db.execute_fetchall(
+    invocations_raw = await db.execute_fetchall(
         "SELECT * FROM invocations WHERE tool = ? ORDER BY started_at DESC LIMIT 20",
         (tool["name"],),
     )
+    invocations = []
+    for r in invocations_raw:
+        r = dict(r)
+        try:
+            r["args"] = json.loads(r["args_json"]) if r.get("args_json") else {}
+        except json.JSONDecodeError:
+            r["args"] = r.get("args_json")
+        if r.get("result_json"):
+            try:
+                r["result"] = json.loads(r["result_json"])
+            except json.JSONDecodeError:
+                r["result"] = r["result_json"]
+        else:
+            r["result"] = None
+        invocations.append(r)
 
     return templates.TemplateResponse(
         request,
@@ -91,7 +106,7 @@ async def tool_detail_page(request: Request, tool_id: str):
             "tool": tool,
             "manifest": manifest,
             "code": code,
-            "invocations": [dict(r) for r in invocations],
+            "invocations": invocations,
         },
     )
 
@@ -183,6 +198,30 @@ async def chat_session(request: Request, session_id: str):
             "messages": messages,
             "workspace_tools": workspace_tools,
         },
+    )
+
+
+@router.get("/activity", response_class=HTMLResponse)
+async def activity_page(request: Request):
+    """Live cross-cutting view of every tool invocation, regardless of trigger."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT * FROM invocations ORDER BY started_at DESC LIMIT 50"
+    )
+    invocations = []
+    for r in rows:
+        r = dict(r)
+        try:
+            r["args"] = json.loads(r["args_json"]) if r.get("args_json") else {}
+        except json.JSONDecodeError:
+            r["args"] = {}
+        try:
+            r["result"] = json.loads(r["result_json"]) if r.get("result_json") else None
+        except json.JSONDecodeError:
+            r["result"] = None
+        invocations.append(r)
+    return templates.TemplateResponse(
+        request, "activity.html", {"invocations": invocations},
     )
 
 

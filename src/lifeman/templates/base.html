@@ -326,6 +326,48 @@
             color: var(--warning);
             padding: 4px 0;
         }
+        .tool-block {
+            background: #0f1218;
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--warning);
+            border-radius: 4px;
+            margin: 6px 0;
+            padding: 6px 10px;
+            font-size: 12px;
+        }
+        .tool-block.ok { border-left-color: var(--success); }
+        .tool-block.err { border-left-color: var(--danger); }
+        .tool-block-head {
+            display: flex;
+            justify-content: space-between;
+            color: var(--text-dim);
+            font-size: 11px;
+            margin-bottom: 4px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .tool-block-head .tool-name {
+            color: var(--warning);
+            font-weight: bold;
+        }
+        .tool-block.ok .tool-name { color: var(--success); }
+        .tool-block.err .tool-name { color: var(--danger); }
+        .tool-block-body {
+            color: var(--text-dim);
+            font-family: var(--font-mono);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .tool-block-body.collapsed { display: none; }
+        .tool-block .label {
+            color: var(--text-dim);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 4px;
+        }
     </style>
 </head>
 <body>
@@ -336,6 +378,7 @@
             <a href="/chat?surface=live_chat" class="{% if active_page == 'live_chat' %}active{% endif %}">Live Chat</a>
             <a href="/chat?surface=build_chat" class="{% if active_page == 'build_chat' %}active{% endif %}">Build Chat</a>
             <a href="/tools" class="{% if active_page == 'tools' %}active{% endif %}">Tools</a>
+            <a href="/activity" class="{% if active_page == 'activity' %}active{% endif %}">Activity</a>
             <a href="/permissions" class="{% if active_page == 'permissions' %}active{% endif %}">
                 Permissions
                 {% if pending_permissions is defined and pending_permissions > 0 %}

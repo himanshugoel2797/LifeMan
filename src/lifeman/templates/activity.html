@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% set active_page = "activity" %}
+
+{% block title %}lifeman — Activity{% endblock %}
+
+{% block content %}
+<div class="chat-toolbar">
+    <h1 style="margin: 0;">Activity</h1>
+    <div style="display: flex; gap: 8px; align-items: center;">
+        <span class="reason" id="filter-summary"></span>
+        <select id="source-filter" class="btn">
+            <option value="">all sources</option>
+            <option value="user">user (api/curl)</option>
+            <option value="llm">llm (live chat)</option>
+            <option value="schedule">scheduler</option>
+            <option value="tool">tool-to-tool</option>
+        </select>
+    </div>
+</div>
+
+<p class="reason" style="margin: 12px 0 16px;">
+    Every tool invocation, regardless of trigger. New rows appear live via SSE.
+    Click a row to expand args + result. Each row links back to its session,
+    schedule, or parent invocation when applicable.
+</p>
+
+<div id="invocation-list" style="display: flex; flex-direction: column; gap: 8px;">
+    {% for inv in invocations %}
+    <details class="card" style="margin: 0;" data-invocation-id="{{ inv.id }}" data-source="{{ inv.source }}">
+        <summary style="cursor: pointer; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+            <span class="tag tag-accent">{{ inv.source }}</span>
+            <strong>{{ inv.tool }}</strong>
+            <code style="color: var(--text-dim); font-size: 11px;">{{ inv.id }}</code>
+            <span class="timestamp">{{ inv.started_at[:19] }}</span>
+            {% if inv.error %}
+                <span class="tag" style="border-color: var(--danger); color: var(--danger);">error</span>
+            {% elif inv.finished_at %}
+                <span class="tag tag-success">ok</span>
+            {% else %}
+                <span class="tag tag-warning">running</span>
+            {% endif %}
+            {% if inv.session_id %}<a class="tag" href="/chat/{{ inv.session_id }}">session {{ inv.session_id[:8] }}</a>{% endif %}
+            {% if inv.schedule_id %}<span class="tag">schedule {{ inv.schedule_id[:8] }}</span>{% endif %}
+            {% if inv.parent_invocation_id %}<span class="tag">parent {{ inv.parent_invocation_id[:8] }}</span>{% endif %}
+            {% if inv.reason %}<span class="reason" style="flex-basis: 100%;">{{ inv.reason }}</span>{% endif %}
+        </summary>
+        <div style="margin-top: 12px;">
+            <div class="reason" style="text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;">args</div>
+            <pre style="margin-top: 4px; max-height: 200px;">{{ inv.args | tojson(indent=2) }}</pre>
+            {% if inv.error %}
+            <div class="reason" style="text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; margin-top: 12px; color: var(--danger);">error</div>
+            <pre style="margin-top: 4px; border-color: var(--danger);">{{ inv.error }}</pre>
+            {% endif %}
+            {% if inv.result is not none %}
+            <div class="reason" style="text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; margin-top: 12px;">result</div>
+            <pre style="margin-top: 4px; max-height: 400px;">{{ inv.result | tojson(indent=2) }}</pre>
+            {% endif %}
+        </div>
+    </details>
+    {% else %}
+    <div class="empty">No invocations yet. Run a tool from the API, scheduler, or live chat.</div>
+    {% endfor %}
+</div>
+
+<script>
+const list = document.getElementById('invocation-list');
+const sourceFilter = document.getElementById('source-filter');
+const summary = document.getElementById('filter-summary');
+
+const fmtJSON = (v) => {
+    if (v === undefined || v === null) return '';
+    if (typeof v === 'string') return v;
+    try { return JSON.stringify(v, null, 2); } catch (e) { return String(v); }
+};
+
+const sourceColor = (s) => ({
+    user: 'var(--accent)', llm: 'var(--success)',
+    schedule: 'var(--warning)', tool: 'var(--text-dim)',
+}[s] || 'var(--text-dim)');
+
+function renderRow(inv) {
+    const det = document.createElement('details');
+    det.className = 'card';
+    det.style.margin = 0;
+    det.dataset.invocationId = inv.id;
+    det.dataset.source = inv.source;
+
+    let statusTag;
+    if (inv.status === 'running' || (!inv.finished_at && !inv.error)) {
+        statusTag = '<span class="tag tag-warning">running</span>';
+    } else if (inv.error || inv.status === 'error') {
+        statusTag = '<span class="tag" style="border-color: var(--danger); color: var(--danger);">error</span>';
+    } else {
+        statusTag = '<span class="tag tag-success">ok</span>';
+    }
+
+    const links = [];
+    if (inv.session_id) links.push(`<a class="tag" href="/chat/${inv.session_id}">session ${inv.session_id.slice(0,8)}</a>`);
+    if (inv.schedule_id) links.push(`<span class="tag">schedule ${inv.schedule_id.slice(0,8)}</span>`);
+    if (inv.parent_invocation_id) links.push(`<span class="tag">parent ${inv.parent_invocation_id.slice(0,8)}</span>`);
+
+    const head = document.createElement('summary');
+    head.style.cursor = 'pointer';
+    head.style.display = 'flex';
+    head.style.gap = '12px';
+    head.style.alignItems = 'center';
+    head.style.flexWrap = 'wrap';
+    head.innerHTML = `
+        <span class="tag" style="border-color: ${sourceColor(inv.source)}; color: ${sourceColor(inv.source)};">${inv.source}</span>
+        <a href="/tools" style="color: var(--text); text-decoration: none;"><strong>${inv.tool}</strong></a>
+        <code style="color: var(--text-dim); font-size: 11px;">${inv.id}</code>
+        <span class="timestamp">${(inv.started_at || '').slice(0,19)}</span>
+        ${statusTag}
+        ${links.join('')}
+    `;
+    if (inv.reason) {
+        const r = document.createElement('span');
+        r.className = 'reason';
+        r.style.flexBasis = '100%';
+        r.textContent = inv.reason;
+        head.appendChild(r);
+    }
+    det.appendChild(head);
+
+    const body = document.createElement('div');
+    body.style.marginTop = '12px';
+
+    const argsLbl = document.createElement('div');
+    argsLbl.className = 'reason';
+    argsLbl.style.cssText = 'text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;';
+    argsLbl.textContent = 'args';
+    const argsPre = document.createElement('pre');
+    argsPre.style.cssText = 'margin-top: 4px; max-height: 200px;';
+    argsPre.textContent = fmtJSON(inv.args);
+    body.appendChild(argsLbl);
+    body.appendChild(argsPre);
+
+    if (inv.error) {
+        const el = document.createElement('div');
+        el.className = 'reason';
+        el.style.cssText = 'text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; margin-top: 12px; color: var(--danger);';
+        el.textContent = 'error';
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'margin-top: 4px; border-color: var(--danger);';
+        pre.textContent = inv.error;
+        body.appendChild(el);
+        body.appendChild(pre);
+    }
+    if (inv.result !== null && inv.result !== undefined) {
+        const el = document.createElement('div');
+        el.className = 'reason';
+        el.style.cssText = 'text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; margin-top: 12px;';
+        el.textContent = 'result';
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'margin-top: 4px; max-height: 400px;';
+        pre.textContent = fmtJSON(inv.result);
+        body.appendChild(el);
+        body.appendChild(pre);
+    }
+
+    det.appendChild(body);
+    return det;
+}
+
+function applyFilter() {
+    const v = sourceFilter.value;
+    let shown = 0, total = 0;
+    for (const row of list.children) {
+        if (!row.dataset || !row.dataset.invocationId) continue;
+        total++;
+        const show = !v || row.dataset.source === v;
+        row.style.display = show ? '' : 'none';
+        if (show) shown++;
+    }
+    summary.textContent = v ? `${shown} / ${total} matching` : `${total} invocations`;
+}
+sourceFilter.addEventListener('change', applyFilter);
+applyFilter();
+
+// Subscribe to SSE for live updates. The bus already emits invocation_started/completed.
+const evt = new EventSource('/events');
+evt.addEventListener('invocation_started', (e) => {
+    const inv = JSON.parse(e.data);
+    inv.status = 'running';
+    inv.args = inv.args || {};
+    const existing = list.querySelector(`[data-invocation-id="${inv.id}"]`);
+    if (existing) return;
+    const row = renderRow(inv);
+    if (list.firstChild) list.insertBefore(row, list.firstChild);
+    else list.appendChild(row);
+    row.open = true;
+    applyFilter();
+});
+evt.addEventListener('invocation_completed', (e) => {
+    const inv = JSON.parse(e.data);
+    const existing = list.querySelector(`[data-invocation-id="${inv.id}"]`);
+    if (existing) {
+        // Re-fetch full record so we have args.
+        fetch(`/api/tools/invocations/${inv.id}`, {
+            headers: { 'Authorization': 'Bearer ' + (window.LIFEMAN_TOKEN || '') },
+        }).then(r => r.ok ? r.json() : null).then(full => {
+            if (!full) return;
+            full.status = inv.status;
+            const fresh = renderRow({ ...inv, ...full });
+            existing.replaceWith(fresh);
+            applyFilter();
+        });
+    }
+});
+</script>
+{% endblock %}

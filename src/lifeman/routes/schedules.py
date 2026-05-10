@@ -35,8 +35,11 @@ async def create_schedule(body: ScheduleCreate, _: str = Depends(require_auth)):
 
     sched_id = str(uuid.uuid4())[:12]
     now = datetime.now(timezone.utc).isoformat()
-    fires_at = compute_initial_fires_at(body.when)
-    when_spec = json.dumps(body.when) if isinstance(body.when, dict) else body.when
+    try:
+        fires_at = compute_initial_fires_at(body.when)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    when_spec = json.dumps(body.when) if isinstance(body.when, dict) else str(body.when)
 
     await db.execute(
         """INSERT INTO schedules (id, tool, args_json, when_spec, context_refs_json, reason, created_at, fires_at)
@@ -132,8 +135,11 @@ async def reschedule(sched_id: str, body: Reschedule, _: str = Depends(require_a
     if not rows:
         raise HTTPException(404, "Schedule not found")
 
-    fires_at = compute_initial_fires_at(body.when)
-    when_spec = json.dumps(body.when) if isinstance(body.when, dict) else body.when
+    try:
+        fires_at = compute_initial_fires_at(body.when)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    when_spec = json.dumps(body.when) if isinstance(body.when, dict) else str(body.when)
 
     await db.execute(
         "UPDATE schedules SET when_spec = ?, fires_at = ? WHERE id = ?",

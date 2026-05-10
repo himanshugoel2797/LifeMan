@@ -109,6 +109,62 @@
         scrollToEnd();
     };
 
+    const formatJSON = (val) => {
+        if (val === undefined || val === null) return '';
+        if (typeof val === 'string') {
+            try { val = JSON.parse(val); } catch (e) { return val; }
+        }
+        try { return JSON.stringify(val, null, 2); } catch (e) { return String(val); }
+    };
+
+    /** Append a collapsible tool-call block; returns the block so the matching
+     * result event can attach to it. */
+    const startToolBlock = (host, name, args) => {
+        const block = document.createElement('div');
+        block.className = 'tool-block';
+        const head = document.createElement('div');
+        head.className = 'tool-block-head';
+        head.innerHTML = `<span><span class="tool-name">${name || 'tool'}</span> · running…</span><span>▾</span>`;
+        const body = document.createElement('div');
+        body.className = 'tool-block-body';
+
+        if (args !== undefined && args !== null) {
+            const argLabel = document.createElement('div');
+            argLabel.className = 'label';
+            argLabel.textContent = 'args';
+            const argPre = document.createElement('div');
+            argPre.textContent = formatJSON(args);
+            body.appendChild(argLabel);
+            body.appendChild(argPre);
+        }
+
+        head.addEventListener('click', () => {
+            body.classList.toggle('collapsed');
+            head.lastChild.textContent = body.classList.contains('collapsed') ? '▸' : '▾';
+        });
+
+        block.appendChild(head);
+        block.appendChild(body);
+        host.appendChild(block);
+        scrollToEnd();
+        return { block, head, body };
+    };
+
+    const finishToolBlock = (ref, ok, summary) => {
+        if (!ref) return;
+        ref.block.classList.add(ok ? 'ok' : 'err');
+        ref.head.firstChild.innerHTML = `<span class="tool-name">${ref.head.querySelector('.tool-name').textContent}</span> · ${ok ? 'ok' : 'error'}`;
+
+        const resLabel = document.createElement('div');
+        resLabel.className = 'label';
+        resLabel.textContent = ok ? 'result' : 'error';
+        const resPre = document.createElement('div');
+        resPre.textContent = formatJSON(summary);
+        ref.body.appendChild(resLabel);
+        ref.body.appendChild(resPre);
+        scrollToEnd();
+    };
+
     /** Parse SSE-formatted text from a fetch() ReadableStream.
      * sse-starlette emits CRLF line endings, so we normalize to \n before splitting. */
     async function* parseSSE(response) {
@@ -172,6 +228,7 @@
                 return;
             }
 
+            const pendingTools = [];   // FIFO of currently-open tool blocks
             for await (const evt of parseSSE(r)) {
                 let data = {};
                 try { data = JSON.parse(evt.data || '{}'); } catch (e) {}
@@ -180,11 +237,12 @@
                     body.appendChild(document.createTextNode(data.text || ''));
                     scrollToEnd();
                 } else if (evt.event === 'tool_call') {
-                    appendToolEvent(body.parentElement, '→ ' + (data.name || 'tool') +
-                        (data.args_raw ? ' ' + data.args_raw : (data.args ? ' ' + JSON.stringify(data.args) : '')));
+                    const args = data.args !== undefined ? data.args
+                        : (data.args_raw ? data.args_raw : null);
+                    pendingTools.push(startToolBlock(body.parentElement, data.name || 'tool', args));
                 } else if (evt.event === 'tool_result') {
-                    appendToolEvent(body.parentElement,
-                        (data.ok ? '✓' : '✗') + ' ' + (data.summary || ''));
+                    const ref = pendingTools.shift();
+                    finishToolBlock(ref, !!data.ok, data.summary);
                 } else if (evt.event === 'error') {
                     appendToolEvent(body.parentElement, '[error] ' + (data.message || ''));
                 } else if (evt.event === 'done') {

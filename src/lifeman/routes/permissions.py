@@ -18,6 +18,7 @@ from lifeman.models import (
     PermissionRequestRecord,
     PermissionResolve,
 )
+from lifeman.permissions_runtime import notify_resolved
 from lifeman.sse import bus
 
 router = APIRouter()
@@ -126,12 +127,12 @@ async def resolve_permission(request_id: str, body: PermissionResolve, _: str = 
         (status, now, request_id),
     )
 
-    # If granted, create a permission record
-    if body.action in ("allow_once", "allow_always"):
+    # Only `allow_always` persists a standing grant. `allow_once` releases
+    # the single pending request without creating a row, so the next call by
+    # the same requester for the same capability will prompt again.
+    if body.action == "allow_always":
         perm_id = str(uuid.uuid4())[:12]
         scope = json.loads(req["scope_json"])
-        if body.action == "allow_once":
-            scope["once"] = True
         await db.execute(
             """INSERT INTO permissions (id, granter, grantee, capability, scope_json, granted_at)
                VALUES (?, 'user', ?, ?, ?, ?)""",
@@ -152,6 +153,9 @@ async def resolve_permission(request_id: str, body: PermissionResolve, _: str = 
         "action": body.action,
         "capability": req["capability"],
     })
+
+    # Wake any in-process awaiter (a tool blocked on `await_permission`).
+    notify_resolved(request_id, status)
 
     return OkResponse()
 

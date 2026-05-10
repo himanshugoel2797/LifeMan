@@ -1,16 +1,19 @@
 """Tool definitions exposed to the local LLM during live chat.
 
-These mirror a subset of the MCP surface in `lifeman.mcp_server`, but call
+These mirror the full MCP surface defined in `lifeman.mcp_server` but call
 internal handlers directly instead of round-tripping through HTTP. Each
-entry is `(openai_function_schema, handler_coroutine)`.
+entry is `(openai_function_schema, handler_coroutine)`. Keep this surface
+in sync with `mcp_server.py` and the DESIGN.MD MCP surface section.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from lifeman import audit
 from lifeman.db import get_db
@@ -41,7 +44,7 @@ async def _handle_list_tools(args: dict) -> dict:
     return {"tools": [dict(r) for r in rows]}
 
 
-async def _handle_invoke(args: dict) -> dict:
+async def _handle_invoke(args: dict, *, session_id: str | None = None) -> dict:
     from lifeman.routes.tools import _execute_tool
 
     tool = args.get("tool")
@@ -52,6 +55,7 @@ async def _handle_invoke(args: dict) -> dict:
         args.get("args") or {},
         source="llm",
         reason=args.get("reason", "live_chat"),
+        session_id=session_id,
     )
     result.pop("_invocation_id", None)
     return result
@@ -66,8 +70,11 @@ async def _handle_schedule(args: dict) -> dict:
     when = args.get("when")
     if when is None:
         return {"error": "missing 'when'"}
-    fires_at = compute_initial_fires_at(when)
-    when_spec = json.dumps(when) if isinstance(when, dict) else when
+    try:
+        fires_at = compute_initial_fires_at(when)
+    except ValueError as e:
+        return {"error": str(e)}
+    when_spec = json.dumps(when) if isinstance(when, dict) else str(when)
     await db.execute(
         """INSERT INTO schedules
            (id, tool, args_json, when_spec, context_refs_json, reason, created_at, fires_at)
@@ -151,6 +158,248 @@ async def _handle_audit_log(args: dict) -> dict:
     return {"entries": [dict(r) for r in rows]}
 
 
+async def _handle_describe_tool(args: dict) -> dict:
+    db = await get_db()
+    name_or_id = args.get("tool") or args.get("id") or args.get("name")
+    if not name_or_id:
+        return {"error": "missing 'tool' (name or id)"}
+    rows = await db.execute_fetchall(
+        "SELECT * FROM tools WHERE id = ? OR name = ?", (name_or_id, name_or_id)
+    )
+    if not rows:
+        return {"error": f"no tool '{name_or_id}'"}
+    t = dict(rows[0])
+    manifest_rows = await db.execute_fetchall(
+        "SELECT manifest_json, schema_input_json, schema_output_json "
+        "FROM tool_manifests WHERE tool_id = ? ORDER BY version DESC LIMIT 1",
+        (t["id"],),
+    )
+    manifest: dict = {}
+    schema_input: dict = {}
+    schema_output: dict = {}
+    if manifest_rows:
+        m = dict(manifest_rows[0])
+        try: manifest = json.loads(m["manifest_json"])
+        except json.JSONDecodeError: pass
+        try: schema_input = json.loads(m["schema_input_json"])
+        except json.JSONDecodeError: pass
+        try: schema_output = json.loads(m["schema_output_json"])
+        except json.JSONDecodeError: pass
+    recent = await db.execute_fetchall(
+        "SELECT id, source, started_at, finished_at, error FROM invocations "
+        "WHERE tool = ? ORDER BY started_at DESC LIMIT 5",
+        (t["name"],),
+    )
+    return {
+        "id": t["id"], "name": t["name"], "description": t["description"],
+        "category": t["category"], "manifest": manifest,
+        "schema_input": schema_input, "schema_output": schema_output,
+        "recent_invocations": [dict(r) for r in recent],
+    }
+
+
+async def _handle_get_scheduled(args: dict) -> dict:
+    db = await get_db()
+    sid = args.get("id")
+    if not sid:
+        return {"error": "missing 'id'"}
+    rows = await db.execute_fetchall("SELECT * FROM schedules WHERE id = ?", (sid,))
+    if not rows:
+        return {"error": "schedule not found"}
+    r = dict(rows[0])
+    return {
+        "id": r["id"], "tool": r["tool"],
+        "args": json.loads(r["args_json"]),
+        "when_spec": r["when_spec"],
+        "context_refs": json.loads(r["context_refs_json"]),
+        "reason": r["reason"], "fires_at": r["fires_at"],
+        "last_fired": r.get("last_fired"),
+        "consecutive_no_ops": r["consecutive_no_ops"],
+        "total_fires": r["total_fires"],
+        "cancelled_at": r.get("cancelled_at"),
+    }
+
+
+async def _handle_update_context(args: dict) -> dict:
+    db = await get_db()
+    sid = args.get("id")
+    if not sid:
+        return {"error": "missing 'id'"}
+    new_args = args.get("args")
+    new_refs = args.get("context_refs")
+    if new_args is None and new_refs is None:
+        return {"error": "no fields to update"}
+    sets, vals = [], []
+    if new_args is not None:
+        sets.append("args_json = ?"); vals.append(json.dumps(new_args))
+    if new_refs is not None:
+        sets.append("context_refs_json = ?"); vals.append(json.dumps(new_refs))
+    vals.append(sid)
+    await db.execute(f"UPDATE schedules SET {', '.join(sets)} WHERE id = ?", vals)
+    await db.commit()
+    await audit.log(source="llm", action="update_context", target=sid)
+    return {"ok": True}
+
+
+async def _handle_reschedule(args: dict) -> dict:
+    from lifeman.scheduler import compute_initial_fires_at
+
+    db = await get_db()
+    sid = args.get("id")
+    when = args.get("when")
+    if not sid or when is None:
+        return {"error": "missing 'id' or 'when'"}
+    try:
+        fires_at = compute_initial_fires_at(when)
+    except ValueError as e:
+        return {"error": str(e)}
+    when_spec = json.dumps(when) if isinstance(when, dict) else str(when)
+    await db.execute(
+        "UPDATE schedules SET when_spec = ?, fires_at = ? WHERE id = ?",
+        (when_spec, fires_at, sid),
+    )
+    await db.commit()
+    await audit.log(source="llm", action="reschedule", target=sid, args_summary=str(when))
+    return {"ok": True, "fires_at": fires_at}
+
+
+async def _handle_cancel_schedule(args: dict) -> dict:
+    db = await get_db()
+    sid = args.get("id")
+    if not sid:
+        return {"error": "missing 'id'"}
+    now = datetime.now(timezone.utc).isoformat()
+    await db.execute("UPDATE schedules SET cancelled_at = ? WHERE id = ?", (now, sid))
+    await db.commit()
+    await audit.log(
+        source="llm", action="cancel_schedule",
+        target=sid, reason=args.get("reason", ""),
+    )
+    return {"ok": True}
+
+
+async def _handle_recurrence_status(args: dict) -> dict:
+    db = await get_db()
+    sid = args.get("id")
+    if not sid:
+        return {"error": "missing 'id'"}
+    rows = await db.execute_fetchall(
+        "SELECT fires_at, last_fired, consecutive_no_ops, total_fires FROM schedules WHERE id = ?",
+        (sid,),
+    )
+    if not rows:
+        return {"error": "schedule not found"}
+    return dict(rows[0])
+
+
+async def _handle_request_permission(args: dict) -> dict:
+    db = await get_db()
+    pid = str(uuid.uuid4())[:12]
+    now = datetime.now(timezone.utc).isoformat()
+    await db.execute(
+        """INSERT INTO permission_requests
+           (id, requester, capability, scope_json, reason, status, requested_at)
+           VALUES (?, 'llm', ?, ?, ?, 'pending', ?)""",
+        (
+            pid,
+            args.get("capability", ""),
+            json.dumps(args.get("scope") or {}),
+            args.get("reason", ""),
+            now,
+        ),
+    )
+    await db.commit()
+    await audit.log(
+        source="llm", action="request_permission",
+        target=args.get("capability", ""), reason=args.get("reason", ""),
+    )
+    return {"id": pid, "status": "pending"}
+
+
+async def _handle_my_permissions(_: dict) -> dict:
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT capability, scope_json, granted_at, expires_at FROM permissions "
+        "WHERE grantee = 'llm' AND revoked_at IS NULL"
+    )
+    return {
+        "permissions": [
+            {
+                "capability": r["capability"],
+                "scope": json.loads(r["scope_json"]),
+                "granted_at": r["granted_at"],
+                "expires_at": r["expires_at"],
+            }
+            for r in rows
+        ]
+    }
+
+
+async def _handle_current_session(_: dict) -> dict:
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT * FROM sessions WHERE archived_at IS NULL "
+        "ORDER BY last_message_at DESC LIMIT 1"
+    )
+    if not rows:
+        return {"id": None}
+    r = dict(rows[0])
+    return {
+        "id": r["id"], "surface": r["surface"], "title": r.get("title", ""),
+        "started_at": r["started_at"], "last_message_at": r["last_message_at"],
+        "message_count": r["message_count"],
+    }
+
+
+async def _handle_user_status(_: dict) -> dict:
+    return {
+        "available": True,
+        "last_active": datetime.now(timezone.utc).isoformat(),
+        "do_not_disturb": False,
+    }
+
+
+async def _handle_system_status(_: dict) -> dict:
+    db = await get_db()
+    active = await db.execute_fetchall(
+        "SELECT COUNT(*) AS c FROM schedules WHERE cancelled_at IS NULL"
+    )
+    pending = await db.execute_fetchall(
+        "SELECT COUNT(*) AS c FROM permission_requests WHERE status = 'pending'"
+    )
+    hour_ago = datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc).isoformat()
+    errors = await db.execute_fetchall(
+        "SELECT COUNT(*) AS c FROM invocations WHERE error IS NOT NULL AND started_at > ?",
+        (hour_ago,),
+    )
+    tools_count = await db.execute_fetchall(
+        "SELECT COUNT(*) AS c FROM tools WHERE deprecated_at IS NULL"
+    )
+    return {
+        "active_schedules": active[0]["c"],
+        "pending_permissions": pending[0]["c"],
+        "recent_errors_1h": errors[0]["c"],
+        "installed_tools": tools_count[0]["c"],
+    }
+
+
+async def _handle_sleep(args: dict) -> dict:
+    seconds = min(int(args.get("seconds", 1)), 60)
+    await asyncio.sleep(seconds)
+    return {"ok": True, "slept": seconds}
+
+
+async def _handle_recent_interactions(args: dict) -> dict:
+    db = await get_db()
+    limit = int(args.get("limit", 5))
+    rows = await db.execute_fetchall(
+        "SELECT id, surface, title, last_message_at, message_count FROM sessions "
+        "WHERE archived_at IS NULL ORDER BY last_message_at DESC LIMIT ?",
+        (limit,),
+    )
+    return {"sessions": [dict(r) for r in rows]}
+
+
 # ---------------------------------------------------------------------------
 # OpenAI-format function schemas
 # ---------------------------------------------------------------------------
@@ -192,7 +441,11 @@ SPECS: dict[str, tuple[dict, Callable[[dict], Awaitable[dict]]]] = {
     "schedule": (
         _fn(
             "schedule",
-            "Schedule a tool invocation for later. `when` is an ISO timestamp or {recur, at}.",
+            "Schedule a tool invocation for later. `when` accepts a relative duration "
+            "string like '30s', '5m', '2h', '1d' (preferred — you do not need to know "
+            "the current time), an integer number of seconds, {in_seconds: N}, an "
+            "ISO 8601 UTC timestamp (must be in the future), or {recur, at} for "
+            "recurrence (e.g. {recur: 'daily', at: '09:00'}).",
             {
                 "type": "object",
                 "properties": {
@@ -255,6 +508,132 @@ SPECS: dict[str, tuple[dict, Callable[[dict], Awaitable[dict]]]] = {
         ),
         _handle_audit_log,
     ),
+    "describe_tool": (
+        _fn(
+            "describe_tool",
+            "Get a tool's manifest, args/result schemas, and recent invocations.",
+            {"type": "object", "properties": {"tool": {"type": "string"}}, "required": ["tool"]},
+        ),
+        _handle_describe_tool,
+    ),
+    "get_scheduled": (
+        _fn(
+            "get_scheduled",
+            "Get details of one scheduled invocation by id.",
+            {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+        ),
+        _handle_get_scheduled,
+    ),
+    "update_context": (
+        _fn(
+            "update_context",
+            "Edit the args or context_refs of a pending scheduled invocation before it fires.",
+            {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "args": {"type": "object"},
+                    "context_refs": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id"],
+            },
+        ),
+        _handle_update_context,
+    ),
+    "reschedule": (
+        _fn(
+            "reschedule",
+            "Change when a scheduled invocation fires. `when` accepts the same forms "
+            "as `schedule` (relative duration like '5m', integer seconds, "
+            "{in_seconds: N}, ISO timestamp, or {recur, at}).",
+            {"type": "object", "properties": {"id": {"type": "string"}, "when": {}}, "required": ["id", "when"]},
+        ),
+        _handle_reschedule,
+    ),
+    "cancel": (
+        _fn(
+            "cancel",
+            "Cancel a scheduled invocation. Always include a reason.",
+            {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "reason": {"type": "string"}},
+                "required": ["id", "reason"],
+            },
+        ),
+        _handle_cancel_schedule,
+    ),
+    "recurrence_status": (
+        _fn(
+            "recurrence_status",
+            "Check the firing history of a recurring schedule (fires, no-ops, last fire).",
+            {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+        ),
+        _handle_recurrence_status,
+    ),
+    "request_permission": (
+        _fn(
+            "request_permission",
+            "Request a capability when one of your tool calls hits a permission_required marker.",
+            {
+                "type": "object",
+                "properties": {
+                    "capability": {"type": "string"},
+                    "scope": {"type": "object"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["capability", "reason"],
+            },
+        ),
+        _handle_request_permission,
+    ),
+    "my_permissions": (
+        _fn(
+            "my_permissions",
+            "List the standing permissions currently granted to the LLM.",
+            {"type": "object", "properties": {}},
+        ),
+        _handle_my_permissions,
+    ),
+    "current_session": (
+        _fn(
+            "current_session",
+            "Get info about the most recent chat session.",
+            {"type": "object", "properties": {}},
+        ),
+        _handle_current_session,
+    ),
+    "user_status": (
+        _fn(
+            "user_status",
+            "Get minimal user availability info.",
+            {"type": "object", "properties": {}},
+        ),
+        _handle_user_status,
+    ),
+    "system_status": (
+        _fn(
+            "system_status",
+            "Get system health: active schedules, pending permissions, recent errors, installed tools.",
+            {"type": "object", "properties": {}},
+        ),
+        _handle_system_status,
+    ),
+    "sleep": (
+        _fn(
+            "sleep",
+            "Pause for up to 60 seconds (e.g. when you want to give a tool time to finish before polling).",
+            {"type": "object", "properties": {"seconds": {"type": "integer"}}, "required": ["seconds"]},
+        ),
+        _handle_sleep,
+    ),
+    "recent_interactions": (
+        _fn(
+            "recent_interactions",
+            "List recent chat sessions across surfaces.",
+            {"type": "object", "properties": {"limit": {"type": "integer"}}},
+        ),
+        _handle_recent_interactions,
+    ),
 }
 
 
@@ -262,8 +641,12 @@ def tool_specs() -> list[dict]:
     return [spec for spec, _ in SPECS.values()]
 
 
-async def dispatch(name: str, raw_args: str) -> dict:
-    """Run a tool call and return a JSON-serializable result dict."""
+async def dispatch(name: str, raw_args: str, *, session_id: str | None = None) -> dict:
+    """Run a tool call and return a JSON-serializable result dict.
+
+    `session_id` is the live-chat session that triggered the call; the invoke
+    handler propagates it so resulting tool runs are linked back to the chat.
+    """
     if name not in SPECS:
         return {"error": f"unknown tool '{name}'"}
     try:
@@ -274,6 +657,9 @@ async def dispatch(name: str, raw_args: str) -> dict:
         return {"error": "arguments must be a JSON object"}
     _, handler = SPECS[name]
     try:
+        # Only the invoke handler needs session_id today; pass kwarg-aware.
+        if name == "invoke":
+            return await handler(args, session_id=session_id)
         return await handler(args)
     except Exception as e:  # noqa: BLE001 — surface tool errors to the model
         return {"error": f"{type(e).__name__}: {e}"}

@@ -404,15 +404,22 @@ async def _stream_live(session_id: str, request: Request):
                     fn = call.get("function") or {}
                     name = fn.get("name", "")
                     raw_args = fn.get("arguments") or "{}"
+                    try:
+                        parsed_args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        parsed_args = raw_args
                     yield {
                         "event": "tool_call",
-                        "data": json.dumps({"name": name, "args_raw": raw_args}),
+                        "data": json.dumps({"name": name, "args": parsed_args}),
                     }
-                    result = await dispatch_tool(name, raw_args)
-                    summary = json.dumps(result)[:400]
+                    result = await dispatch_tool(name, raw_args, session_id=session_id)
                     yield {
                         "event": "tool_result",
-                        "data": json.dumps({"name": name, "ok": "error" not in result, "summary": summary}),
+                        "data": json.dumps({
+                            "name": name,
+                            "ok": "error" not in result,
+                            "summary": result,  # full object — browser formats
+                        }),
                     }
                     await _append_message(
                         session_id,

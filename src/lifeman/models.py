@@ -97,7 +97,7 @@ class PermissionResolve(BaseModel):
 class ScheduleCreate(BaseModel):
     tool: str
     args: dict = Field(default_factory=dict)
-    when: str | dict  # ISO timestamp or {recur: "daily", at: "08:00"}
+    when: str | int | float | dict  # relative duration, seconds, ISO timestamp, or {recur, at}
     context_refs: list[str] = Field(default_factory=list)
     reason: str
 
@@ -123,7 +123,7 @@ class ScheduleUpdate(BaseModel):
 
 
 class Reschedule(BaseModel):
-    when: str | dict
+    when: str | int | float | dict
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +146,10 @@ class Invocation(BaseModel):
     started_at: str
     finished_at: str | None = None
     schedule_id: str | None = None
+    session_id: str | None = None
+    parent_invocation_id: str | None = None
+    status: str = "completed"
+    reason: str = ""
 
 
 # ---------------------------------------------------------------------------

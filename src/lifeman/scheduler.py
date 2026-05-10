@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from lifeman.db import get_db
@@ -12,6 +13,15 @@ from lifeman import audit
 from lifeman.sse import bus
 
 log = logging.getLogger(__name__)
+
+_RELATIVE_DURATION_RE = re.compile(r"^\s*(\d+)\s*(s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?\s*$", re.I)
+_UNIT_TO_SECONDS = {
+    None: 1, "": 1,
+    "s": 1, "sec": 1, "secs": 1,
+    "m": 60, "min": 60, "mins": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+}
 
 _task: asyncio.Task | None = None
 
@@ -142,26 +152,91 @@ def _compute_next_fire(when_spec: str) -> str | None:
     return next_dt.isoformat()
 
 
-def compute_initial_fires_at(when: str | dict) -> str:
-    """Compute the initial fires_at from a when spec."""
-    if isinstance(when, str):
-        # ISO timestamp — use directly
-        return when
+def _parse_relative_duration(s: str) -> timedelta | None:
+    """Parse '30s', '5m', '2h', '1d', or a bare integer (seconds). Returns None on miss."""
+    m = _RELATIVE_DURATION_RE.match(s)
+    if not m:
+        return None
+    value = int(m.group(1))
+    unit = (m.group(2) or "s").lower()
+    return timedelta(seconds=value * _UNIT_TO_SECONDS[unit])
 
-    # Recurrence spec: compute first fire
+
+def compute_initial_fires_at(when) -> str:
+    """Compute the initial fires_at from a when spec.
+
+    Accepted forms:
+      * int / float                         — seconds from now
+      * "30s" / "5m" / "2h" / "1d" / "60"   — relative duration (recommended)
+      * {"in_seconds": N} or {"in": "5m"}   — relative form as object
+      * ISO 8601 timestamp with timezone    — must not be more than 5s in the past
+      * {"recur": "daily"|"hourly"|"weekly", "at": "HH:MM"} — recurring
+
+    Raises ValueError with a remediation hint when the input is invalid.
+    """
     now = datetime.now(timezone.utc)
-    at_time = when.get("at", "00:00")
-    parts = at_time.split(":")
-    hour, minute = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
 
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target <= now:
-        recur = when.get("recur", "daily")
-        if recur == "hourly":
-            target += timedelta(hours=1)
-        elif recur == "weekly":
-            target += timedelta(weeks=1)
-        else:
-            target += timedelta(days=1)
+    if isinstance(when, bool):  # bool is an int subclass — reject explicitly
+        raise ValueError("'when' must be a duration, timestamp, or recurrence object")
 
-    return target.isoformat()
+    if isinstance(when, (int, float)):
+        return (now + timedelta(seconds=float(when))).isoformat()
+
+    if isinstance(when, str):
+        rel = _parse_relative_duration(when)
+        if rel is not None:
+            return (now + rel).isoformat()
+        # Fall through to ISO 8601 parsing.
+        try:
+            dt = datetime.fromisoformat(when.replace("Z", "+00:00"))
+        except ValueError as e:
+            raise ValueError(
+                f"invalid 'when' string {when!r}. Use a relative duration like '30s', "
+                "'5m', '2h', '1d', a bare number of seconds, {in_seconds: N}, or an "
+                "ISO 8601 UTC timestamp."
+            ) from e
+        if dt.tzinfo is None:
+            raise ValueError(
+                f"ISO timestamp {when!r} is missing a timezone offset. Append '+00:00' "
+                "or 'Z' for UTC, or just use a relative duration like '60s'."
+            )
+        dt_utc = dt.astimezone(timezone.utc)
+        if (now - dt_utc).total_seconds() > 5:
+            raise ValueError(
+                f"timestamp {when!r} is in the past (now is {now.isoformat()}). "
+                "Prefer a relative form like '60s' or {in_seconds: 60} so you don't "
+                "have to know the current time."
+            )
+        return dt_utc.isoformat()
+
+    if isinstance(when, dict):
+        if "in_seconds" in when:
+            return (now + timedelta(seconds=float(when["in_seconds"]))).isoformat()
+        if "in" in when:
+            rel = _parse_relative_duration(str(when["in"]))
+            if rel is None:
+                raise ValueError(
+                    f"invalid 'in' value {when['in']!r}. Use '30s', '5m', '2h', or '1d'."
+                )
+            return (now + rel).isoformat()
+
+        if "recur" in when or "at" in when:
+            at_time = when.get("at", "00:00")
+            parts = at_time.split(":")
+            hour, minute = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target <= now:
+                recur = when.get("recur", "daily")
+                if recur == "hourly":
+                    target += timedelta(hours=1)
+                elif recur == "weekly":
+                    target += timedelta(weeks=1)
+                else:
+                    target += timedelta(days=1)
+            return target.isoformat()
+
+    raise ValueError(
+        f"unrecognized 'when' value {when!r}. Use a relative duration string "
+        "('30s', '5m'), a number of seconds, {in_seconds: N}, an ISO timestamp, "
+        "or a recurrence {recur, at}."
+    )

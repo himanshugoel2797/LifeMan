@@ -76,7 +76,11 @@ CREATE TABLE IF NOT EXISTS invocations (
     error TEXT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
-    schedule_id TEXT REFERENCES schedules(id)
+    schedule_id TEXT REFERENCES schedules(id),
+    session_id TEXT REFERENCES sessions(id),
+    parent_invocation_id TEXT,
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'completed'
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -151,6 +155,17 @@ _SESSION_COLUMN_ADDS = [
     ("archived_at", "TEXT"),
 ]
 
+_INVOCATION_COLUMN_ADDS = [
+    ("session_id", "TEXT"),
+    ("parent_invocation_id", "TEXT"),
+    ("reason", "TEXT NOT NULL DEFAULT ''"),
+    ("status", "TEXT NOT NULL DEFAULT 'completed'"),
+]
+
+_PERMISSION_REQUEST_COLUMN_ADDS = [
+    ("invocation_id", "TEXT"),
+]
+
 
 async def get_db() -> aiosqlite.Connection:
     global _db
@@ -162,11 +177,16 @@ async def get_db() -> aiosqlite.Connection:
         await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA foreign_keys=ON")
         await _db.executescript(SCHEMA)
-        # Lightweight migration: add new sessions columns if upgrading from older schema.
-        existing = {r["name"] for r in await _db.execute_fetchall("PRAGMA table_info(sessions)")}
-        for col, ddl in _SESSION_COLUMN_ADDS:
-            if col not in existing:
-                await _db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {ddl}")
+        # Lightweight migration: add new columns if upgrading from older schema.
+        async def _migrate(table: str, adds: list[tuple[str, str]]) -> None:
+            cols = {r["name"] for r in await _db.execute_fetchall(f"PRAGMA table_info({table})")}
+            for col, ddl in adds:
+                if col not in cols:
+                    await _db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+        await _migrate("sessions", _SESSION_COLUMN_ADDS)
+        await _migrate("invocations", _INVOCATION_COLUMN_ADDS)
+        await _migrate("permission_requests", _PERMISSION_REQUEST_COLUMN_ADDS)
         await _db.commit()
     return _db
 

@@ -25,6 +25,7 @@ from lifeman.models import (
 )
 from lifeman.sandbox import run_tool
 from lifeman.sse import bus
+from lifeman.tool_socket import ToolSocket
 
 router = APIRouter()
 
@@ -128,6 +129,72 @@ async def list_tools(
     return result
 
 
+@router.get("/invocations")
+async def list_invocations(
+    tool: str | None = None,
+    source: str | None = None,
+    session_id: str | None = None,
+    schedule_id: str | None = None,
+    since: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    _: str = Depends(require_auth),
+):
+    """Cross-cutting view of every invocation, regardless of trigger source.
+
+    Filterable by tool, source (user/llm/schedule/tool), session, schedule,
+    status (running/ok/error), or `since` (ISO timestamp). The Activity UI
+    page calls this with a poll-then-SSE pattern.
+    """
+    db = await get_db()
+    clauses, vals = [], []
+    if tool:
+        clauses.append("tool = ?"); vals.append(tool)
+    if source:
+        clauses.append("source = ?"); vals.append(source)
+    if session_id:
+        clauses.append("session_id = ?"); vals.append(session_id)
+    if schedule_id:
+        clauses.append("schedule_id = ?"); vals.append(schedule_id)
+    if status:
+        clauses.append("status = ?"); vals.append(status)
+    if since:
+        clauses.append("started_at > ?"); vals.append(since)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    vals.append(min(int(limit), 200))
+    rows = await db.execute_fetchall(
+        f"SELECT * FROM invocations {where} ORDER BY started_at DESC LIMIT ?",
+        vals,
+    )
+    out = []
+    for r in rows:
+        r = dict(r)
+        try:
+            args_obj = json.loads(r["args_json"]) if r.get("args_json") else {}
+        except json.JSONDecodeError:
+            args_obj = {}
+        try:
+            result_obj = json.loads(r["result_json"]) if r.get("result_json") else None
+        except json.JSONDecodeError:
+            result_obj = None
+        out.append({
+            "id": r["id"],
+            "tool": r["tool"],
+            "source": r["source"],
+            "status": r.get("status", "completed"),
+            "args": args_obj,
+            "result": result_obj,
+            "error": r.get("error"),
+            "reason": r.get("reason", ""),
+            "started_at": r["started_at"],
+            "finished_at": r.get("finished_at"),
+            "session_id": r.get("session_id"),
+            "schedule_id": r.get("schedule_id"),
+            "parent_invocation_id": r.get("parent_invocation_id"),
+        })
+    return out
+
+
 @router.get("/{tool_id}", response_model=ToolDetail)
 async def get_tool(tool_id: str, _: str = Depends(require_auth)):
     db = await get_db()
@@ -219,6 +286,10 @@ async def get_invocation(invocation_id: str, _: str = Depends(require_auth)):
         started_at=r["started_at"],
         finished_at=r["finished_at"],
         schedule_id=r.get("schedule_id"),
+        session_id=r.get("session_id"),
+        parent_invocation_id=r.get("parent_invocation_id"),
+        status=r.get("status") or "completed",
+        reason=r.get("reason") or "",
     )
 
 
@@ -238,8 +309,10 @@ async def _execute_tool(
     source: str = "user",
     reason: str = "",
     schedule_id: str | None = None,
+    session_id: str | None = None,
+    parent_invocation_id: str | None = None,
 ) -> dict:
-    """Core tool execution logic used by API and scheduler."""
+    """Core tool execution logic used by API, scheduler, chat, and tool-side API."""
     db = await get_db()
 
     # Look up tool
@@ -252,13 +325,24 @@ async def _execute_tool(
     inv_id = str(uuid.uuid4())[:12]
     now = datetime.now(timezone.utc).isoformat()
     await db.execute(
-        """INSERT INTO invocations (id, tool, args_json, source, started_at, schedule_id)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (inv_id, tool_name, json.dumps(args), source, now, schedule_id),
+        """INSERT INTO invocations
+           (id, tool, args_json, source, started_at, schedule_id, session_id,
+            parent_invocation_id, reason, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')""",
+        (
+            inv_id, tool_name, json.dumps(args), source, now, schedule_id,
+            session_id, parent_invocation_id, reason,
+        ),
     )
     await db.commit()
+    await bus.publish("invocation_started", {
+        "id": inv_id, "tool": tool_name, "source": source,
+        "session_id": session_id, "schedule_id": schedule_id,
+        "parent_invocation_id": parent_invocation_id,
+        "reason": reason, "started_at": now,
+    })
 
-    # Run in sandbox
+    # Run in sandbox, behind a per-invocation tool-side API socket.
     tool_dir = settings.get_tools_dir() / tool["id"]
     if not (tool_dir / "run.py").exists():
         result = {"error": "Tool code not found on disk"}
@@ -271,14 +355,24 @@ async def _execute_tool(
         if manifest_rows:
             manifest = json.loads(manifest_rows[0]["manifest_json"])
             timeout = manifest.get("compute_limits", {}).get("timeout", 30.0)
-        result = await run_tool(tool_dir, args, timeout=timeout)
+        async with ToolSocket(
+            invocation_id=inv_id,
+            tool_name=tool_name,
+            source=source,
+            session_id=session_id,
+        ) as ts:
+            result = await run_tool(
+                tool_dir, args, timeout=timeout,
+                socket_path=str(ts.socket_path),
+            )
 
     # Update invocation
     finished = datetime.now(timezone.utc).isoformat()
     error = result.get("error")
+    status = "error" if error else "ok"
     await db.execute(
-        "UPDATE invocations SET result_json = ?, error = ?, finished_at = ? WHERE id = ?",
-        (json.dumps(result), error, finished, inv_id),
+        "UPDATE invocations SET result_json = ?, error = ?, finished_at = ?, status = ? WHERE id = ?",
+        (json.dumps(result), error, finished, status, inv_id),
     )
     await db.commit()
 
@@ -291,6 +385,15 @@ async def _execute_tool(
         result_summary=json.dumps(result)[:200] if result else "",
         reason=reason,
     )
+
+    await bus.publish("invocation_completed", {
+        "id": inv_id, "tool": tool_name, "source": source, "status": status,
+        "session_id": session_id, "schedule_id": schedule_id,
+        "parent_invocation_id": parent_invocation_id,
+        "finished_at": finished,
+        "error": error,
+        "result": result if not error else None,
+    })
 
     result["_invocation_id"] = inv_id
     return result
