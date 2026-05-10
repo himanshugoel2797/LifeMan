@@ -308,6 +308,41 @@ def list_secret_names() -> list[dict]:
     return _c().call("list_secret_names")
 
 
+# ---------------------------------------------------------------------------
+# Network policy
+# ---------------------------------------------------------------------------
+
+def network_hosts() -> list[str]:
+    """Return the host allowlist this tool declared in `manifest.network`.
+
+    Empty list means the tool was sandboxed without network access. A
+    non-empty list means the tool has network reachability — the entries
+    are the hosts the tool author committed to talking to. The sandbox
+    does not (yet) enforce the allowlist at the syscall level, so a
+    well-behaved tool should self-restrict (e.g. set HTTP_PROXY, validate
+    URLs against this list before calling out).
+    """
+    raw = os.environ.get("LIFEMAN_NETWORK_HOSTS", "")
+    return [h.strip() for h in raw.split(",") if h.strip()]
+
+
+def network_allowed(host: str) -> bool:
+    """True if `host` is covered by the tool's network allowlist.
+
+    Matches exact host strings and the "*" wildcard. Use this to gate
+    requests in tool-side code:
+
+        if not network_allowed(parsed.hostname or ""):
+            raise RuntimeError(f"{parsed.hostname} not in declared allowlist")
+    """
+    allow = network_hosts()
+    if not allow:
+        return False
+    if "*" in allow:
+        return True
+    return host in allow
+
+
 def ingest_input(
     surface: str,
     raw_payload: str,

@@ -95,23 +95,37 @@ async def run_tool(
     args: dict,
     timeout: float = 30.0,
     socket_path: str | None = None,
+    network_hosts: list[str] | None = None,
 ) -> dict:
     """Run a tool in a bubblewrap sandbox (or directly if sandbox disabled).
 
     `socket_path` (when set) is a Unix-domain-socket the tool can use to call
     back into core via the `lifeman_tool` helper. The caller — usually
     `_execute_tool` — owns the socket lifecycle.
+
+    `network_hosts` — if non-empty, give the tool access to the host's
+    network namespace and expose the declared allowlist via the
+    `LIFEMAN_NETWORK_HOSTS` env var. When None or empty, the network
+    namespace is unshared and the tool has no network. Allowlist
+    enforcement at the syscall level is future work (egress proxy);
+    for now the manifest declaration is the contract and exposing the
+    list to tool-side code lets responsible tools self-restrict.
     """
     input_json = json.dumps(args)
+    network_hosts = network_hosts or []
 
     if not settings.sandbox_enabled or not shutil.which(settings.bwrap_path):
-        return await _run_direct(tool_dir, input_json, timeout, socket_path)
+        return await _run_direct(tool_dir, input_json, timeout, socket_path, network_hosts)
 
-    return await _run_sandboxed(tool_dir, input_json, timeout, socket_path)
+    return await _run_sandboxed(tool_dir, input_json, timeout, socket_path, network_hosts)
 
 
 async def _run_direct(
-    tool_dir: Path, input_json: str, timeout: float, socket_path: str | None
+    tool_dir: Path,
+    input_json: str,
+    timeout: float,
+    socket_path: str | None,
+    network_hosts: list[str] | None = None,
 ) -> dict:
     """Run tool directly without sandbox (development mode)."""
     env = os.environ.copy()
@@ -119,6 +133,8 @@ async def _run_direct(
     env["PYTHONPATH"] = f"{runtime}:{env.get('PYTHONPATH', '')}".rstrip(":")
     if socket_path:
         env["LIFEMAN_TOOL_SOCKET"] = socket_path
+    if network_hosts:
+        env["LIFEMAN_NETWORK_HOSTS"] = ",".join(network_hosts)
     proc = await asyncio.create_subprocess_exec(
         "python3", str(tool_dir / "run.py"),
         stdin=asyncio.subprocess.PIPE,
@@ -147,7 +163,11 @@ async def _run_direct(
 
 
 async def _run_sandboxed(
-    tool_dir: Path, input_json: str, timeout: float, socket_path: str | None
+    tool_dir: Path,
+    input_json: str,
+    timeout: float,
+    socket_path: str | None,
+    network_hosts: list[str] | None = None,
 ) -> dict:
     """Run tool inside bubblewrap sandbox."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -166,7 +186,10 @@ async def _run_sandboxed(
             pass_fds = (r,)
 
         try:
-            cmd = _build_bwrap_cmd(tool_dir, Path(tmpdir), socket_path, seccomp_fd)
+            cmd = _build_bwrap_cmd(
+                tool_dir, Path(tmpdir), socket_path, seccomp_fd,
+                network_hosts=network_hosts,
+            )
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -204,6 +227,8 @@ def _build_bwrap_cmd(
     scratch_dir: Path,
     socket_path: str | None,
     seccomp_fd: int = -1,
+    *,
+    network_hosts: list[str] | None = None,
 ) -> list[str]:
     """Build the bubblewrap command with layered isolation."""
     bwrap = settings.bwrap_path
@@ -240,11 +265,23 @@ def _build_bwrap_cmd(
         if prefix not in ("/usr", "/") and Path(prefix).exists():
             binds.append(("--ro-bind", prefix, prefix))
 
+    network_hosts = network_hosts or []
+
     cmd: list[str] = [
         bwrap,
         # Namespace isolation
         "--unshare-all",
         "--die-with-parent",
+    ]
+    # Per-tool network policy: if the manifest declares hosts, retain the
+    # host's network namespace so the tool can reach the network. Empty
+    # declaration → keep the network namespace unshared and the tool gets
+    # nothing. Allowlist enforcement at the syscall level is future work
+    # (egress proxy); the LIFEMAN_NETWORK_HOSTS env var below carries the
+    # declared list to the tool so a responsible tool author can self-restrict.
+    if network_hosts:
+        cmd.append("--share-net")
+    cmd += [
         # Detach from controlling terminal — defends against TIOCSTI input
         # injection back to the user's shell.
         "--new-session",
@@ -284,6 +321,17 @@ def _build_bwrap_cmd(
         cmd += [
             "--bind", socket_path, SANDBOX_SOCKET_PATH,
             "--setenv", "LIFEMAN_TOOL_SOCKET", SANDBOX_SOCKET_PATH,
+        ]
+    if network_hosts:
+        # Bind the host's resolver config so DNS works inside the sandbox.
+        # This is only meaningful when --share-net is set above; without it,
+        # there's no network namespace to resolve in.
+        if Path("/etc/resolv.conf").exists():
+            cmd += ["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"]
+        if Path("/etc/hosts").exists():
+            cmd += ["--ro-bind", "/etc/hosts", "/etc/hosts"]
+        cmd += [
+            "--setenv", "LIFEMAN_NETWORK_HOSTS", ",".join(network_hosts),
         ]
     if seccomp_fd >= 0:
         cmd += ["--seccomp", str(seccomp_fd)]

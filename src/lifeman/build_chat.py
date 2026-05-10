@@ -96,7 +96,7 @@ TOOL_CONTRACT = dedent(
       "category": "general",
       "reads": [],            // data categories the tool may read
       "writes": [],           // data categories the tool may write
-      "network": [],          // egress URL allowlist (empty = no network)
+      "network": [],          // host allowlist; empty = no network at all
       "compute_limits": {"timeout": 30},
       "triggers": [],         // tools/actions this tool can trigger
       "user_visible": true
@@ -105,7 +105,17 @@ TOOL_CONTRACT = dedent(
     Unknown fields are ignored at register time but should be omitted.
 
     ### Sandbox semantics
-    - No network unless `manifest.network` lists allowed hosts.
+    - **Network**: the sandbox unshares the network namespace by default,
+      so a tool with `network: []` has *no* network access. To request
+      network access, list the hosts the tool will contact in
+      `manifest.network` (or `["*"]` if you genuinely need open egress —
+      flag this for the user). When the list is non-empty, the sandbox
+      shares the host's network namespace and `LIFEMAN_NETWORK_HOSTS`
+      contains the comma-separated allowlist. Use
+      `lifeman_tool.network_allowed(host)` to self-gate requests; the
+      manifest declaration is the user-visible contract. The kernel does
+      not yet enforce the allowlist at the syscall level (egress proxy
+      is future work).
     - No filesystem writes outside `/scratch` (path injected as
       `LIFEMAN_SCRATCH` env var inside the sandbox).
     - Default timeout is 30s; raise `compute_limits.timeout` if you need more.

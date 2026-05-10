@@ -348,6 +348,7 @@ async def _execute_tool(
         result = {"error": "Tool code not found on disk"}
     else:
         timeout = 30.0
+        network_hosts: list[str] = []
         manifest_rows = await db.execute_fetchall(
             "SELECT manifest_json FROM tool_manifests WHERE tool_id = ? ORDER BY version DESC LIMIT 1",
             (tool["id"],),
@@ -355,6 +356,9 @@ async def _execute_tool(
         if manifest_rows:
             manifest = json.loads(manifest_rows[0]["manifest_json"])
             timeout = manifest.get("compute_limits", {}).get("timeout", 30.0)
+            raw_net = manifest.get("network", [])
+            if isinstance(raw_net, list):
+                network_hosts = [str(h) for h in raw_net if h]
         async with ToolSocket(
             invocation_id=inv_id,
             tool_name=tool_name,
@@ -364,6 +368,7 @@ async def _execute_tool(
             result = await run_tool(
                 tool_dir, args, timeout=timeout,
                 socket_path=str(ts.socket_path),
+                network_hosts=network_hosts,
             )
 
     # Update invocation
