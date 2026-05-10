@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import jsonschema
 from fastapi import APIRouter, Depends, HTTPException
 
 from lifeman import audit
@@ -342,23 +343,47 @@ async def _execute_tool(
         "reason": reason, "started_at": now,
     })
 
+    # Load manifest + input schema from the latest version.
+    timeout = 30.0
+    network_hosts: list[str] = []
+    schema_input: dict = {}
+    manifest_rows = await db.execute_fetchall(
+        "SELECT manifest_json, schema_input_json FROM tool_manifests "
+        "WHERE tool_id = ? ORDER BY version DESC LIMIT 1",
+        (tool["id"],),
+    )
+    if manifest_rows:
+        manifest = json.loads(manifest_rows[0]["manifest_json"])
+        timeout = manifest.get("compute_limits", {}).get("timeout", 30.0)
+        raw_net = manifest.get("network", [])
+        if isinstance(raw_net, list):
+            network_hosts = [str(h) for h in raw_net if h]
+        try:
+            schema_input = json.loads(manifest_rows[0]["schema_input_json"] or "{}")
+        except json.JSONDecodeError:
+            schema_input = {}
+
+    # Validate args against schema_input when the tool declared one.
+    # Empty dict ({} on register) means "no contract" and skips the gate; a
+    # non-empty schema is opt-in enforcement so callers (the LLM in
+    # particular) get a clear error instead of a downstream tool crash.
+    validation_error: str | None = None
+    if isinstance(schema_input, dict) and schema_input:
+        try:
+            jsonschema.validate(instance=args, schema=schema_input)
+        except jsonschema.ValidationError as e:
+            path = "/".join(str(p) for p in e.absolute_path) or "(root)"
+            validation_error = f"args failed schema_input at {path}: {e.message}"
+        except jsonschema.SchemaError as e:
+            validation_error = f"schema_input itself is invalid: {e.message}"
+
     # Run in sandbox, behind a per-invocation tool-side API socket.
     tool_dir = settings.get_tools_dir() / tool["id"]
-    if not (tool_dir / "run.py").exists():
+    if validation_error is not None:
+        result = {"error": validation_error}
+    elif not (tool_dir / "run.py").exists():
         result = {"error": "Tool code not found on disk"}
     else:
-        timeout = 30.0
-        network_hosts: list[str] = []
-        manifest_rows = await db.execute_fetchall(
-            "SELECT manifest_json FROM tool_manifests WHERE tool_id = ? ORDER BY version DESC LIMIT 1",
-            (tool["id"],),
-        )
-        if manifest_rows:
-            manifest = json.loads(manifest_rows[0]["manifest_json"])
-            timeout = manifest.get("compute_limits", {}).get("timeout", 30.0)
-            raw_net = manifest.get("network", [])
-            if isinstance(raw_net, list):
-                network_hosts = [str(h) for h in raw_net if h]
         async with ToolSocket(
             invocation_id=inv_id,
             tool_name=tool_name,

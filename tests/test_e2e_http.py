@@ -144,6 +144,61 @@ async def test_register_duplicate_name_rejected(http_client):
 
 
 @pytest.mark.asyncio
+async def test_invoke_validates_args_against_schema_input(http_client):
+    """A non-empty schema_input is enforced: bad args fail before the tool runs."""
+    register = await http_client.post("/api/tools", json={
+        "name": "schema_echo",
+        "description": "echo with a schema",
+        "code": ECHO_TOOL_CODE,
+        "schema_input": {
+            "type": "object",
+            "required": ["msg"],
+            "properties": {"msg": {"type": "string"}},
+        },
+    })
+    assert register.status_code == 200
+
+    # Missing required key — should fail validation, not run the tool.
+    bad = await http_client.post("/api/tools/invoke", json={
+        "tool": "schema_echo", "args": {}, "reason": "bad",
+    })
+    assert bad.status_code == 200
+    body = bad.json()
+    assert body["error"] and "schema_input" in body["error"]
+    assert body["result"] is None  # tool never ran
+
+    # Wrong type — also rejected.
+    wrong = await http_client.post("/api/tools/invoke", json={
+        "tool": "schema_echo", "args": {"msg": 42}, "reason": "wrong type",
+    })
+    assert wrong.json()["error"]
+
+    # Valid args still go through.
+    good = await http_client.post("/api/tools/invoke", json={
+        "tool": "schema_echo", "args": {"msg": "hi"}, "reason": "ok",
+    })
+    assert good.json()["error"] is None
+    assert good.json()["result"] == {"echoed": "hi"}
+
+
+@pytest.mark.asyncio
+async def test_empty_schema_input_skips_validation(http_client):
+    """Tools registered without a schema_input ({} default) accept anything."""
+    await http_client.post("/api/tools", json={
+        "name": "no_schema_echo",
+        "description": "no schema, anything goes",
+        "code": ECHO_TOOL_CODE,
+    })
+    # Pass args that would fail any non-trivial schema; should still run.
+    r = await http_client.post("/api/tools/invoke", json={
+        "tool": "no_schema_echo",
+        "args": {"unexpected_key": [1, 2, 3]},
+        "reason": "free-form",
+    })
+    assert r.json()["error"] is None
+
+
+@pytest.mark.asyncio
 async def test_invoke_unknown_tool_returns_error_in_payload(http_client):
     r = await http_client.post("/api/tools/invoke", json={
         "tool": "no_such_tool", "args": {}, "reason": "t",

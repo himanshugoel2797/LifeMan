@@ -27,6 +27,11 @@ source, and POSTs to `/api/tools`. The hint under the submit button
 reminds you that for non-trivial tools this is the wrong door — most
 tools should be authored in the [build chat](build_chat.md) instead.
 
+If `schema_input` is non-empty, the runtime enforces it on every
+invocation — bad args fail with a `schema_input` error before the
+sandbox is launched. Empty `{}` skips the gate. `schema_output` is
+documentation only.
+
 A `tool_registered` SSE event reloads the page so freshly built tools
 appear without a manual refresh.
 

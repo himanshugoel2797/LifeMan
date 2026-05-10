@@ -14,8 +14,15 @@ A tool is four things:
 2. **Implementation** — Python source that reads JSON from stdin,
    writes JSON to stdout, and may call into the core via the runtime
    socket.
-3. **Schemas** — Pydantic-style JSON Schema for input and output. Not
-   strictly enforced today; informational.
+3. **Schemas** — JSON Schema for input and output, declared at register
+   time. `schema_input` is **enforced** when non-empty: args are
+   validated by `jsonschema.validate` in `_execute_tool` before the
+   sandbox is launched, and a failing call returns `{"error": "args
+   failed schema_input at <path>: <message>"}` without running the
+   tool. The default at registration is `{}`, which means "no
+   contract" and skips the gate — opt in by declaring a real schema.
+   `schema_output` is informational only: nothing checks the tool's
+   return shape, so callers should treat it as documentation.
 4. **Identity** — `tool:<name>`, the string used in audit logs and
    permission grants.
 
