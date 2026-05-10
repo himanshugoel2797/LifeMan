@@ -26,11 +26,8 @@ from lifeman.memory.models import (
     RecordMemoryResponse,
 )
 from lifeman.memory.router import builtin_route
-from lifeman.routing.discovery import find_handler_tools
 from lifeman.routing.domain import RoutingDomain
-from lifeman.routing.engine import Engine
-from lifeman.routing.event import HandlerManifest
-from lifeman.routing.tool_backed import ToolBackedHandler
+from lifeman.routing.engine import create_engine
 
 log = logging.getLogger("lifeman.memory")
 
@@ -46,36 +43,10 @@ MEMORY_DOMAIN = RoutingDomain(
 )
 
 
-# ---------------------------------------------------------------------------
-# Engine wiring
-# ---------------------------------------------------------------------------
-
-async def _list_handlers() -> list[HandlerManifest]:
-    out: list[HandlerManifest] = [h.manifest for h in mem_registry.all()]
-    seen = {h.name for h in out}
-    for name, manifest, _ext in await find_handler_tools(MEMORY_DOMAIN):
-        if name in seen:
-            continue
-        out.append(manifest)
-        seen.add(name)
-    return out
-
-
-async def _resolve_handler(name):
-    builtin = mem_registry.get(name)
-    if builtin is not None:
-        return builtin
-    for tool_name, manifest, ext in await find_handler_tools(MEMORY_DOMAIN):
-        if tool_name == name:
-            return ToolBackedHandler(MEMORY_DOMAIN, tool_name, manifest, ext)
-    return None
-
-
-engine = Engine(
+engine = create_engine(
     domain=MEMORY_DOMAIN,
-    resolve_handler=_resolve_handler,
+    builtin_registry=mem_registry,
     builtin_router=builtin_route,
-    list_handlers=_list_handlers,
     fallback_handler="memory_store",   # safe default: always store
 )
 

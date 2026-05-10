@@ -14,6 +14,7 @@ import logging
 from typing import Any, Awaitable, Callable
 
 from lifeman.routing.event import HandlerManifest
+from lifeman.routing.registry import Registry
 
 log = logging.getLogger("lifeman.routing.handlers")
 
@@ -58,28 +59,7 @@ class BuiltinHandler:
             return {"error": f"{type(e).__name__}: {e}"}
 
 
-class HandlerRegistry:
-    """Per-domain in-process handler registry. Mirrors lifeman.outputs.registry
-    but generic — handlers are `BuiltinHandler` instances keyed by name.
-    """
-
-    def __init__(self) -> None:
-        self._handlers: dict[str, BuiltinHandler] = {}
-
-    def register(self, handler: BuiltinHandler) -> None:
-        self._handlers[handler.name] = handler
-
-    def unregister(self, name: str) -> None:
-        self._handlers.pop(name, None)
-
-    def get(self, name: str) -> BuiltinHandler | None:
-        return self._handlers.get(name)
-
-    def all(self) -> list[BuiltinHandler]:
-        return list(self._handlers.values())
-
-    def names(self) -> list[str]:
-        return list(self._handlers.keys())
+HandlerRegistry = Registry[BuiltinHandler]
 
 
 def make_discard_handler(domain: str) -> BuiltinHandler:

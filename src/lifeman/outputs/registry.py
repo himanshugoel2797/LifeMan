@@ -12,7 +12,6 @@ base class for type clarity even though Python doesn't strictly need it.
 from __future__ import annotations
 
 import abc
-import logging
 from typing import Iterable
 
 from lifeman.outputs.models import (
@@ -20,14 +19,17 @@ from lifeman.outputs.models import (
     DeliveryResult,
     OutputEvent,
 )
-
-log = logging.getLogger("lifeman.outputs.registry")
+from lifeman.routing.registry import Registry
 
 
 class OutputChannel(abc.ABC):
     """Channel-tool interface. Built-in channels subclass this directly."""
 
     manifest: ChannelManifest
+
+    @property
+    def name(self) -> str:
+        return self.manifest.name
 
     @abc.abstractmethod
     async def deliver(self, event: OutputEvent) -> DeliveryResult:
@@ -54,30 +56,7 @@ class OutputChannel(abc.ABC):
         return False
 
 
-class _Registry:
-    def __init__(self) -> None:
-        self._channels: dict[str, OutputChannel] = {}
-
-    def register(self, channel: OutputChannel) -> None:
-        name = channel.manifest.name
-        if name in self._channels:
-            log.debug("re-registering channel %s", name)
-        self._channels[name] = channel
-
-    def unregister(self, name: str) -> None:
-        self._channels.pop(name, None)
-
-    def get(self, name: str) -> OutputChannel | None:
-        return self._channels.get(name)
-
-    def all(self) -> list[OutputChannel]:
-        return list(self._channels.values())
-
-    def names(self) -> list[str]:
-        return list(self._channels.keys())
-
-
-registry = _Registry()
+registry: Registry[OutputChannel] = Registry()
 
 
 def all_channel_names() -> list[str]:

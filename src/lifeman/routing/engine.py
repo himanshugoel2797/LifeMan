@@ -27,7 +27,9 @@ from lifeman.db import get_db
 from lifeman.routing import discovery
 from lifeman.routing.domain import RoutingDomain
 from lifeman.routing.event import HandlerManifest, RoutedEvent, RoutingDecision
-from lifeman.routing.tool_backed import route_via_tool
+from lifeman.routing.handlers import BuiltinHandler
+from lifeman.routing.registry import Registry
+from lifeman.routing.tool_backed import ToolBackedHandler, route_via_tool
 
 log = logging.getLogger("lifeman.routing.engine")
 
@@ -186,3 +188,44 @@ class Engine:
             ),
         )
         await db.commit()
+
+
+def create_engine(
+    *,
+    domain: RoutingDomain,
+    builtin_registry: Registry[BuiltinHandler],
+    builtin_router: InProcessRouter,
+    fallback_handler: str | None = None,
+) -> Engine:
+    """Standard engine wiring used by inputs / memory / observations.
+
+    Builds the `list_handlers` and `resolve_handler` closures that merge
+    in-process built-ins (from `builtin_registry`) with tool-backed handlers
+    discovered via the manifest role declared on `domain`.
+    """
+    async def _list_handlers() -> list[HandlerManifest]:
+        out: list[HandlerManifest] = [h.manifest for h in builtin_registry.all()]
+        seen = {h.name for h in out}
+        for name, manifest, _ext in await discovery.find_handler_tools(domain):
+            if name in seen:
+                continue
+            out.append(manifest)
+            seen.add(name)
+        return out
+
+    async def _resolve_handler(name: str):
+        builtin = builtin_registry.get(name)
+        if builtin is not None:
+            return builtin
+        for tool_name, manifest, ext in await discovery.find_handler_tools(domain):
+            if tool_name == name:
+                return ToolBackedHandler(domain, tool_name, manifest, ext)
+        return None
+
+    return Engine(
+        domain=domain,
+        resolve_handler=_resolve_handler,
+        builtin_router=builtin_router,
+        list_handlers=_list_handlers,
+        fallback_handler=fallback_handler,
+    )

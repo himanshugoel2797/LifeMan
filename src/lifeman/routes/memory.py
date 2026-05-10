@@ -14,6 +14,7 @@ from lifeman.memory.models import (
     RecordMemoryRequest,
     RecordMemoryResponse,
 )
+from lifeman.routes._audit import load_audit_and_dispatches
 
 router = APIRouter()
 
@@ -50,12 +51,6 @@ async def get_memory_event(event_id: str, _: str = Depends(require_auth)):
     if not rows:
         raise HTTPException(404, "memory event not found")
     r = dict(rows[0])
-    audit = await db.execute_fetchall(
-        "SELECT * FROM memory_routing_audit WHERE event_id = ? ORDER BY id ASC", (event_id,),
-    )
-    dispatches = await db.execute_fetchall(
-        "SELECT * FROM memory_dispatches WHERE event_id = ? ORDER BY id ASC", (event_id,),
-    )
     return {
         "event_id": r["id"],
         "content": r["content"],
@@ -66,26 +61,9 @@ async def get_memory_event(event_id: str, _: str = Depends(require_auth)):
         "context": json.loads(r["context_json"]),
         "reason": r["reason"],
         "emitted_at": r["emitted_at"],
-        "routing_audit": [
-            {
-                "matched_rules": json.loads(a["matched_rules_json"]),
-                "candidate_handlers": json.loads(a["candidate_handlers_json"]),
-                "filtered": json.loads(a["filtered_json"]),
-                "dispatched": json.loads(a["dispatched_json"]),
-                "expired": bool(a["expired"]),
-                "notes": a["notes"],
-                "decided_at": a["decided_at"],
-            }
-            for a in audit
-        ],
-        "dispatches": [
-            {
-                "handler": d["handler"],
-                "ok": bool(d["ok"]),
-                "external_id": d["external_id"],
-                "failure_reason": d["failure_reason"],
-                "dispatched_at": d["dispatched_at"],
-            }
-            for d in dispatches
-        ],
+        **await load_audit_and_dispatches(
+            audit_table="memory_routing_audit",
+            dispatch_table="memory_dispatches",
+            event_id=event_id,
+        ),
     }

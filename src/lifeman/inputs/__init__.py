@@ -24,14 +24,10 @@ from lifeman.db import get_db
 from lifeman.inputs.handlers import install_builtin_handlers, registry as in_registry
 from lifeman.inputs.models import IngestInputResponse, InputEvent
 from lifeman.inputs.router import builtin_route
-from lifeman.routing.discovery import find_handler_tools
-from lifeman.routing.engine import Engine
-from lifeman.routing.event import HandlerManifest
-from lifeman.routing.tool_backed import ToolBackedHandler
+from lifeman.routing.domain import RoutingDomain
+from lifeman.routing.engine import create_engine
 
 log = logging.getLogger("lifeman.inputs")
-
-from lifeman.routing.domain import RoutingDomain
 
 INPUT_DOMAIN = RoutingDomain(
     name="input",
@@ -44,36 +40,10 @@ INPUT_DOMAIN = RoutingDomain(
 )
 
 
-# ---------------------------------------------------------------------------
-# Engine wiring (resolver / list / fallback router)
-# ---------------------------------------------------------------------------
-
-async def _list_handlers() -> list[HandlerManifest]:
-    out: list[HandlerManifest] = [h.manifest for h in in_registry.all()]
-    seen = {h.name for h in out}
-    for name, manifest, _ext in await find_handler_tools(INPUT_DOMAIN):
-        if name in seen:
-            continue
-        out.append(manifest)
-        seen.add(name)
-    return out
-
-
-async def _resolve_handler(name):
-    builtin = in_registry.get(name)
-    if builtin is not None:
-        return builtin
-    for tool_name, manifest, ext in await find_handler_tools(INPUT_DOMAIN):
-        if tool_name == name:
-            return ToolBackedHandler(INPUT_DOMAIN, tool_name, manifest, ext)
-    return None
-
-
-engine = Engine(
+engine = create_engine(
     domain=INPUT_DOMAIN,
-    resolve_handler=_resolve_handler,
+    builtin_registry=in_registry,
     builtin_router=builtin_route,
-    list_handlers=_list_handlers,
     fallback_handler="llm",     # safe-default: hand to the live LLM
 )
 

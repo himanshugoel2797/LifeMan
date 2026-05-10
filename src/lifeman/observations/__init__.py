@@ -24,11 +24,8 @@ from lifeman.observations.handlers import (
 )
 from lifeman.observations.models import ObservationEvent, ObserveResponse
 from lifeman.observations.router import builtin_route
-from lifeman.routing.discovery import find_handler_tools
 from lifeman.routing.domain import RoutingDomain
-from lifeman.routing.engine import Engine
-from lifeman.routing.event import HandlerManifest
-from lifeman.routing.tool_backed import ToolBackedHandler
+from lifeman.routing.engine import create_engine
 
 log = logging.getLogger("lifeman.observations")
 
@@ -44,36 +41,10 @@ OBSERVATION_DOMAIN = RoutingDomain(
 )
 
 
-# ---------------------------------------------------------------------------
-# Engine wiring
-# ---------------------------------------------------------------------------
-
-async def _list_handlers() -> list[HandlerManifest]:
-    out: list[HandlerManifest] = [h.manifest for h in obs_registry.all()]
-    seen = {h.name for h in out}
-    for name, manifest, _ext in await find_handler_tools(OBSERVATION_DOMAIN):
-        if name in seen:
-            continue
-        out.append(manifest)
-        seen.add(name)
-    return out
-
-
-async def _resolve_handler(name):
-    builtin = obs_registry.get(name)
-    if builtin is not None:
-        return builtin
-    for tool_name, manifest, ext in await find_handler_tools(OBSERVATION_DOMAIN):
-        if tool_name == name:
-            return ToolBackedHandler(OBSERVATION_DOMAIN, tool_name, manifest, ext)
-    return None
-
-
-engine = Engine(
+engine = create_engine(
     domain=OBSERVATION_DOMAIN,
-    resolve_handler=_resolve_handler,
+    builtin_registry=obs_registry,
     builtin_router=builtin_route,
-    list_handlers=_list_handlers,
     fallback_handler="archive",   # safe default: don't lose data on router failure
 )
 
