@@ -4,6 +4,8 @@ Personal Companion System — a self-extending AI assistant kernel that runs loc
 
 The core insight: build the smallest system that can build the rest of itself. Register tools, invoke them in sandboxed environments, grant permissions through a web UI, and let a local LLM orchestrate everything via MCP.
 
+Design docs: [DESIGN.MD](DESIGN.MD) (kernel), [OUTPUT_DESIGN.MD](OUTPUT_DESIGN.MD) (output system), [CLIENT_DESIGN.MD](CLIENT_DESIGN.MD) (Android + Windows companion app).
+
 ## Architecture
 
 ```
