@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% set active_page = "outputs" %}
+
+{% block title %}lifeman — Outputs{% endblock %}
+
+{% block content %}
+<h1>Outputs</h1>
+<p class="reason">Notification fabric: tools and the user emit output events; the router fans them out to channels.</p>
+
+<details class="disclose">
+    <summary>+ Emit an output</summary>
+    <form class="form-grid" id="out-form">
+        <label for="o-content">content</label>
+        <textarea id="o-content" required placeholder="A plain string or {title, body, ...} JSON"></textarea>
+
+        <label for="o-category">category</label>
+        <input type="text" id="o-category" value="status">
+
+        <label for="o-urgency">urgency</label>
+        <select id="o-urgency">
+            <option value="ambient" selected>ambient</option>
+            <option value="actionable">actionable</option>
+            <option value="urgent">urgent</option>
+            <option value="critical">critical</option>
+        </select>
+
+        <label for="o-sensitivity">sensitivity</label>
+        <select id="o-sensitivity">
+            <option value="public">public</option>
+            <option value="personal" selected>personal</option>
+            <option value="private">private</option>
+        </select>
+
+        <label for="o-reason">reason</label>
+        <input type="text" id="o-reason">
+
+        <div class="submit-row">
+            <button type="submit" class="btn btn-success">Emit</button>
+        </div>
+    </form>
+</details>
+
+<h2>Recent outputs</h2>
+{% if items %}
+<table>
+    <thead>
+        <tr>
+            <th>When</th>
+            <th>From</th>
+            <th>Category</th>
+            <th>Urgency</th>
+            <th>Content</th>
+            <th>State</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for o in items %}
+        <tr id="out-{{ o.id }}">
+            <td class="timestamp">{{ o.emitted_at[:19] }}</td>
+            <td><span class="tag">{{ o.source_tool }}</span></td>
+            <td>{{ o.category }}</td>
+            <td>
+                {% if o.urgency == 'critical' %}
+                    <span class="tag" style="border-color:var(--danger);color:var(--danger);">{{ o.urgency }}</span>
+                {% elif o.urgency == 'urgent' %}
+                    <span class="tag tag-warning">{{ o.urgency }}</span>
+                {% elif o.urgency == 'actionable' %}
+                    <span class="tag tag-accent">{{ o.urgency }}</span>
+                {% else %}
+                    <span class="tag">{{ o.urgency }}</span>
+                {% endif %}
+            </td>
+            <td style="max-width:380px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                {% if o.content is mapping %}
+                    {{ o.content.get('title') or (o.content.get('body') or '')[:120] }}
+                {% else %}
+                    {{ o.content[:120] }}
+                {% endif %}
+            </td>
+            <td>
+                {% if o.cancelled_at %}
+                    <span class="tag" style="border-color:var(--danger);color:var(--danger);">cancelled</span>
+                {% else %}
+                    <span class="tag tag-success">live</span>
+                {% endif %}
+            </td>
+            <td>
+                <div class="btn-group">
+                    <a class="btn" href="/outputs/{{ o.id }}">Detail</a>
+                    {% if not o.cancelled_at %}
+                    <button class="btn btn-danger" data-action="cancel" data-id="{{ o.id }}">Cancel</button>
+                    {% endif %}
+                </div>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No outputs yet.</div>
+{% endif %}
+
+<h2>Channels</h2>
+{% if channels %}
+<table>
+    <thead><tr><th>Name</th><th>Categories</th><th>Sensitivity tolerance</th><th>Actions?</th></tr></thead>
+    <tbody>
+        {% for c in channels %}
+        <tr>
+            <td><strong>{{ c.name }}</strong></td>
+            <td>
+                {% for k, v in c.items() if k.startswith('handles_') %}
+                    {% if v %}<span class="tag">{{ k.replace('handles_', '') }}</span>{% endif %}
+                {% endfor %}
+            </td>
+            <td>{{ c.get('sensitivity_tolerance', '—') }}</td>
+            <td>{{ 'yes' if c.get('actions') else 'no' }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No output channels installed.</div>
+{% endif %}
+
+<h2>Routing rules</h2>
+{% if rules %}
+<table>
+    <thead><tr><th>Match</th><th>Channels</th><th>Notes</th></tr></thead>
+    <tbody>
+        {% for r in rules %}
+        <tr>
+            <td>
+                {% if r.category %}<span class="tag">cat:{{ r.category }}</span>{% endif %}
+                {% if r.urgency %}<span class="tag">urg:{{ r.urgency }}</span>{% endif %}
+                {% if r.urgency_below %}<span class="tag">below:{{ r.urgency_below }}</span>{% endif %}
+            </td>
+            <td>
+                {% for c in r.channels or [] %}<span class="tag tag-accent">{{ c }}</span> {% endfor %}
+            </td>
+            <td class="reason">{{ r.notes or '' }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No routing rules configured.</div>
+{% endif %}
+
+<script>
+document.getElementById('out-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    let content = document.getElementById('o-content').value;
+    if (content.trim().startsWith('{')) {
+        try { content = JSON.parse(content); }
+        catch (err) { window.toast('content JSON invalid', 'err'); return; }
+    }
+    const body = {
+        content,
+        category: document.getElementById('o-category').value || 'status',
+        urgency: document.getElementById('o-urgency').value,
+        sensitivity: document.getElementById('o-sensitivity').value,
+        reason: document.getElementById('o-reason').value,
+    };
+    const r = await window.lifemanFetch('/api/outputs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!r.ok) { window.toast('Emit failed', 'err'); return; }
+    window.toast('Emitted', 'ok');
+    location.reload();
+});
+
+document.querySelectorAll('button[data-action="cancel"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+        if (!confirm('Cancel this output?')) return;
+        const id = btn.dataset.id;
+        const reason = prompt('Reason?', 'recalled via UI') || '';
+        const r = await window.lifemanFetch(
+            '/api/outputs/' + id + '/cancel?reason=' + encodeURIComponent(reason),
+            { method: 'POST' },
+        );
+        if (!r.ok) { window.toast('Cancel failed', 'err'); return; }
+        location.reload();
+    });
+});
+</script>
+{% endblock %}

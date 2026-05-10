@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% set active_page = "outputs" %}
+
+{% block title %}lifeman — Output {{ output.id }}{% endblock %}
+
+{% block content %}
+<h1><a href="/outputs" style="color:var(--text-dim);">Outputs</a> / {{ output.id }}</h1>
+
+<div class="card">
+    <dl class="kv">
+        <dt>source</dt>     <dd><span class="tag">{{ output.source_tool }}</span></dd>
+        <dt>category</dt>   <dd>{{ output.category }}</dd>
+        <dt>urgency</dt>    <dd>{{ output.urgency }}</dd>
+        <dt>sensitivity</dt><dd>{{ output.sensitivity }}</dd>
+        <dt>emitted</dt>    <dd class="timestamp">{{ output.emitted_at }}</dd>
+        <dt>expires</dt>    <dd class="timestamp">{{ output.expires_at or 'never' }}</dd>
+        {% if output.cancelled_at %}
+        <dt>cancelled</dt>  <dd class="timestamp">{{ output.cancelled_at }}</dd>
+        {% endif %}
+        <dt>reason</dt>     <dd class="reason">{{ output.reason }}</dd>
+    </dl>
+</div>
+
+<h2>Content</h2>
+<pre>{{ output.content | tojson(indent=2) }}</pre>
+
+{% if output.actions %}
+<h2>Actions</h2>
+<pre>{{ output.actions | tojson(indent=2) }}</pre>
+{% endif %}
+
+<h2>Deliveries</h2>
+{% if deliveries %}
+<table>
+    <thead>
+        <tr><th>Channel</th><th>Status</th><th>Delivered at</th><th>Failure</th></tr>
+    </thead>
+    <tbody>
+        {% for d in deliveries %}
+        <tr>
+            <td><span class="tag">{{ d.channel }}</span></td>
+            <td>
+                {% if d.cancelled_at %}
+                    <span class="tag" style="border-color:var(--danger);color:var(--danger);">cancelled</span>
+                {% elif d.delivered %}
+                    <span class="tag tag-success">delivered</span>
+                {% else %}
+                    <span class="tag tag-warning">failed</span>
+                {% endif %}
+            </td>
+            <td class="timestamp">{{ (d.delivered_at or '')[:19] }}</td>
+            <td class="reason">{{ d.failure_reason or '' }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No deliveries recorded.</div>
+{% endif %}
+
+<h2>Routing audit</h2>
+{% if routing_audit %}
+<pre>{{ routing_audit | tojson(indent=2) }}</pre>
+{% else %}
+<div class="empty">No routing audit entries.</div>
+{% endif %}
+{% endblock %}

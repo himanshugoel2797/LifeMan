@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% set active_page = "build_requests" %}
+
+{% block title %}lifeman — Build Requests{% endblock %}
+
+{% block content %}
+<h1>Build Requests</h1>
+<p class="reason">Queued tool-build asks. The build chat picks these up; you can also queue them manually here.</p>
+
+<details class="disclose" {% if not build_requests %}open{% endif %}>
+    <summary>+ Queue a build request</summary>
+    <form class="form-grid" id="br-form">
+        <label for="br-description">description</label>
+        <textarea id="br-description" required placeholder="A tool that posts a Slack message when…"></textarea>
+
+        <label for="br-reason">reason</label>
+        <textarea id="br-reason" required placeholder="Why this tool is needed"></textarea>
+
+        <label for="br-priority">priority</label>
+        <select id="br-priority">
+            <option value="now">now</option>
+            <option value="soon" selected>soon</option>
+            <option value="whenever">whenever</option>
+        </select>
+
+        <div class="submit-row">
+            <button type="submit" class="btn btn-success">Queue</button>
+        </div>
+    </form>
+</details>
+
+<div class="filters">
+    <label>
+        status
+        <select id="status-filter">
+            <option value="" {% if not current_status %}selected{% endif %}>all</option>
+            <option value="queued" {% if current_status == 'queued' %}selected{% endif %}>queued</option>
+            <option value="user_review_needed" {% if current_status == 'user_review_needed' %}selected{% endif %}>user_review_needed</option>
+            <option value="approved" {% if current_status == 'approved' %}selected{% endif %}>approved</option>
+            <option value="completed" {% if current_status == 'completed' %}selected{% endif %}>completed</option>
+            <option value="cancelled" {% if current_status == 'cancelled' %}selected{% endif %}>cancelled</option>
+        </select>
+    </label>
+</div>
+
+<h2>Requests</h2>
+{% if build_requests %}
+<table>
+    <thead>
+        <tr>
+            <th>Status</th>
+            <th>Priority</th>
+            <th>Description</th>
+            <th>Reason</th>
+            <th>Created</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in build_requests %}
+        <tr id="br-{{ r.id }}">
+            <td>
+                {% if r.status == 'completed' %}
+                    <span class="tag tag-success">{{ r.status }}</span>
+                {% elif r.status == 'cancelled' %}
+                    <span class="tag" style="border-color:var(--danger);color:var(--danger);">{{ r.status }}</span>
+                {% elif r.status == 'user_review_needed' %}
+                    <span class="tag tag-warning">{{ r.status }}</span>
+                {% else %}
+                    <span class="tag tag-accent">{{ r.status }}</span>
+                {% endif %}
+            </td>
+            <td><span class="tag">{{ r.priority }}</span></td>
+            <td>{{ r.description }}</td>
+            <td class="reason">{{ r.reason }}</td>
+            <td class="timestamp">{{ r.created_at[:19] }}</td>
+            <td>
+                {% if r.status not in ('completed', 'cancelled') %}
+                <button class="btn btn-danger" data-action="cancel" data-id="{{ r.id }}">Cancel</button>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No build requests.</div>
+{% endif %}
+
+<script>
+(function () {
+    document.getElementById('status-filter').addEventListener('change', (e) => {
+        const v = e.target.value;
+        location.href = v ? '/build-requests?status=' + encodeURIComponent(v) : '/build-requests';
+    });
+
+    document.getElementById('br-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const body = {
+            description: document.getElementById('br-description').value.trim(),
+            reason: document.getElementById('br-reason').value.trim(),
+            priority: document.getElementById('br-priority').value,
+        };
+        const r = await window.lifemanFetch('/api/build-requests', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!r.ok) {
+            window.toast('Queue failed', 'err');
+            return;
+        }
+        window.toast('Queued', 'ok');
+        location.reload();
+    });
+
+    document.querySelectorAll('button[data-action="cancel"]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+            if (!confirm('Cancel this build request?')) return;
+            const id = btn.dataset.id;
+            const r = await window.lifemanFetch('/api/build-requests/' + id, {
+                method: 'DELETE',
+            });
+            if (!r.ok) {
+                window.toast('Cancel failed', 'err');
+                return;
+            }
+            window.toast('Cancelled', 'ok');
+            location.reload();
+        });
+    });
+})();
+</script>
+{% endblock %}

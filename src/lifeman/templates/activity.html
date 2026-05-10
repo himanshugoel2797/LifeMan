@@ -6,17 +6,42 @@
 {% block content %}
 <div class="chat-toolbar">
     <h1 style="margin: 0;">Activity</h1>
-    <div style="display: flex; gap: 8px; align-items: center;">
-        <span class="reason" id="filter-summary"></span>
-        <select id="source-filter" class="btn">
-            <option value="">all sources</option>
-            <option value="user">user (api/curl)</option>
-            <option value="llm">llm (live chat)</option>
-            <option value="schedule">scheduler</option>
-            <option value="tool">tool-to-tool</option>
-        </select>
-    </div>
+    <span class="reason" id="filter-summary"></span>
 </div>
+
+<form class="filters" id="activity-filters" method="get">
+    <label>
+        source
+        <select name="source">
+            <option value="" {% if not source_filter %}selected{% endif %}>all</option>
+            <option value="user" {% if source_filter == 'user' %}selected{% endif %}>user</option>
+            <option value="llm" {% if source_filter == 'llm' %}selected{% endif %}>llm</option>
+            <option value="schedule" {% if source_filter == 'schedule' %}selected{% endif %}>schedule</option>
+            <option value="tool" {% if source_filter == 'tool' %}selected{% endif %}>tool</option>
+        </select>
+    </label>
+    <label>
+        status
+        <select name="status">
+            <option value="" {% if not status_filter %}selected{% endif %}>all</option>
+            <option value="running" {% if status_filter == 'running' %}selected{% endif %}>running</option>
+            <option value="ok" {% if status_filter == 'ok' %}selected{% endif %}>ok</option>
+            <option value="error" {% if status_filter == 'error' %}selected{% endif %}>error</option>
+        </select>
+    </label>
+    <label>
+        tool
+        <input type="text" name="tool" value="{{ tool_filter }}" placeholder="exact name">
+    </label>
+    <label>
+        session
+        <input type="text" name="session_id" value="{{ session_filter }}" placeholder="session id">
+    </label>
+    <button class="btn" type="submit">Apply</button>
+    {% if source_filter or status_filter or tool_filter or session_filter %}
+    <a class="btn" href="/activity">Clear</a>
+    {% endif %}
+</form>
 
 <p class="reason" style="margin: 12px 0 16px;">
     Every tool invocation, regardless of trigger. New rows appear live via SSE.
@@ -64,7 +89,6 @@
 
 <script>
 const list = document.getElementById('invocation-list');
-const sourceFilter = document.getElementById('source-filter');
 const summary = document.getElementById('filter-summary');
 
 const fmtJSON = (v) => {
@@ -163,18 +187,13 @@ function renderRow(inv) {
 }
 
 function applyFilter() {
-    const v = sourceFilter.value;
-    let shown = 0, total = 0;
+    let total = 0;
     for (const row of list.children) {
         if (!row.dataset || !row.dataset.invocationId) continue;
         total++;
-        const show = !v || row.dataset.source === v;
-        row.style.display = show ? '' : 'none';
-        if (show) shown++;
     }
-    summary.textContent = v ? `${shown} / ${total} matching` : `${total} invocations`;
+    summary.textContent = `${total} invocations`;
 }
-sourceFilter.addEventListener('change', applyFilter);
 applyFilter();
 
 // Subscribe to SSE for live updates. The bus already emits invocation_started/completed.

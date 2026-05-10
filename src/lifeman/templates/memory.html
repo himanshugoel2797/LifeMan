@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% set active_page = "memory" %}
+
+{% block title %}lifeman — Memory{% endblock %}
+
+{% block content %}
+<h1>Memory</h1>
+
+<details class="disclose">
+    <summary>+ Record a memory</summary>
+    <form class="form-grid" id="mem-form">
+        <label for="m-content">content</label>
+        <textarea id="m-content" required placeholder="What to remember"></textarea>
+
+        <label for="m-type">type hint</label>
+        <select id="m-type">
+            <option value="">(let router classify)</option>
+            <option value="episodic">episodic</option>
+            <option value="semantic">semantic</option>
+            <option value="identity">identity</option>
+            <option value="summary">summary</option>
+        </select>
+
+        <label for="m-tags">tags</label>
+        <input type="text" id="m-tags" placeholder="comma-separated">
+
+        <label for="m-sensitivity">sensitivity</label>
+        <select id="m-sensitivity">
+            <option value="personal" selected>personal</option>
+            <option value="private">private</option>
+            <option value="public">public</option>
+        </select>
+
+        <label for="m-reason">reason</label>
+        <input type="text" id="m-reason" placeholder="why">
+
+        <div class="submit-row">
+            <button type="submit" class="btn btn-success">Record</button>
+        </div>
+    </form>
+</details>
+
+<form class="filters" id="mem-filters">
+    <label>
+        query
+        <input type="text" name="query" value="{{ query }}" placeholder="text search">
+    </label>
+    <label>
+        type
+        <input type="text" name="type" value="{{ type_filter }}" placeholder="episodic,semantic">
+    </label>
+    <label>
+        tags
+        <input type="text" name="tags" value="{{ tags_filter }}" placeholder="tag1,tag2">
+    </label>
+    <button class="btn" type="submit">Search</button>
+    {% if query or type_filter or tags_filter %}
+    <a class="btn" href="/memory">Clear</a>
+    {% endif %}
+</form>
+
+<h2>Recent memories</h2>
+{% if items %}
+<div style="display:flex; flex-direction:column; gap:8px;">
+    {% for m in items %}
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">{{ m.type or 'unclassified' }}</span>
+            <span class="timestamp">{{ m.created_at[:19] }}</span>
+        </div>
+        <div style="white-space:pre-wrap; word-wrap:break-word;">{{ m.content }}</div>
+        <div style="margin-top:8px;">
+            {% for t in m.tags %}<span class="tag">{{ t }}</span> {% endfor %}
+            <span class="tag" style="border-color:var(--text-dim);">{{ m.sensitivity }}</span>
+            {% if m.source %}<span class="tag">{{ m.source }}</span>{% endif %}
+            <span class="reason"> · {{ m.classified_by }}</span>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty">No memories match.</div>
+{% endif %}
+
+<script>
+document.getElementById('mem-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const tagsRaw = document.getElementById('m-tags').value.trim();
+    const tags = tagsRaw
+        ? tagsRaw.split(',').map((t) => t.trim()).filter(Boolean)
+        : [];
+    const body = {
+        content: document.getElementById('m-content').value,
+        type_hint: document.getElementById('m-type').value || null,
+        tags,
+        sensitivity: document.getElementById('m-sensitivity').value,
+        reason: document.getElementById('m-reason').value,
+        source: 'user',
+    };
+    const r = await window.lifemanFetch('/api/memory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!r.ok) { window.toast('Record failed', 'err'); return; }
+    window.toast('Recorded', 'ok');
+    location.reload();
+});
+</script>
+{% endblock %}

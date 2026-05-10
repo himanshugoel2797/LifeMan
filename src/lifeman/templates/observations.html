@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% set active_page = "observations" %}
+
+{% block title %}lifeman — Observations{% endblock %}
+
+{% block content %}
+<h1>Observations</h1>
+
+<details class="disclose">
+    <summary>+ Emit an observation</summary>
+    <form class="form-grid" id="obs-form">
+        <label for="o-message">message</label>
+        <textarea id="o-message" required></textarea>
+
+        <label for="o-level">level</label>
+        <select id="o-level">
+            <option value="debug">debug</option>
+            <option value="info" selected>info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+        </select>
+
+        <label for="o-component">component</label>
+        <input type="text" id="o-component" placeholder="optional">
+
+        <label for="o-reason">reason</label>
+        <input type="text" id="o-reason">
+
+        <div class="submit-row">
+            <button type="submit" class="btn btn-success">Emit</button>
+        </div>
+    </form>
+</details>
+
+<div class="filters">
+    <label>
+        level
+        <select id="level-filter">
+            <option value="" {% if not level_filter %}selected{% endif %}>all</option>
+            <option value="debug" {% if level_filter == 'debug' %}selected{% endif %}>debug</option>
+            <option value="info" {% if level_filter == 'info' %}selected{% endif %}>info</option>
+            <option value="warn" {% if level_filter == 'warn' %}selected{% endif %}>warn</option>
+            <option value="error" {% if level_filter == 'error' %}selected{% endif %}>error</option>
+        </select>
+    </label>
+</div>
+
+<h2>Recent observations</h2>
+{% if items %}
+<table>
+    <thead>
+        <tr>
+            <th>When</th>
+            <th>Level</th>
+            <th>Component</th>
+            <th>Message</th>
+            <th>Source</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for o in items %}
+        <tr>
+            <td class="timestamp">{{ (o.archived_at or '')[:19] }}</td>
+            <td>
+                {% if o.level == 'error' %}
+                    <span class="tag" style="border-color:var(--danger);color:var(--danger);">{{ o.level }}</span>
+                {% elif o.level == 'warn' %}
+                    <span class="tag tag-warning">{{ o.level }}</span>
+                {% elif o.level == 'debug' %}
+                    <span class="tag" style="color:var(--text-dim);">{{ o.level }}</span>
+                {% else %}
+                    <span class="tag tag-accent">{{ o.level }}</span>
+                {% endif %}
+            </td>
+            <td>{{ o.component or '—' }}</td>
+            <td style="white-space:pre-wrap; word-wrap:break-word;">{{ o.message }}</td>
+            <td><span class="tag">{{ o.source }}</span></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No observations.</div>
+{% endif %}
+
+<script>
+document.getElementById('level-filter').addEventListener('change', (e) => {
+    location.href = e.target.value
+        ? '/observations?level=' + encodeURIComponent(e.target.value)
+        : '/observations';
+});
+
+document.getElementById('obs-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = {
+        message: document.getElementById('o-message').value,
+        level: document.getElementById('o-level').value,
+        component: document.getElementById('o-component').value,
+        reason: document.getElementById('o-reason').value,
+        source: 'user',
+    };
+    const r = await window.lifemanFetch('/api/observations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!r.ok) { window.toast('Emit failed', 'err'); return; }
+    window.toast('Emitted', 'ok');
+    location.reload();
+});
+</script>
+{% endblock %}

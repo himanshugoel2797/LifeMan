@@ -12,9 +12,15 @@
             · <a href="/chat?surface={{ session.surface }}" style="color: var(--text-dim);">back to sessions</a>
         </div>
     </div>
-    {% if session.surface == "build_chat" %}
-    <button class="btn" id="refresh-workspace-btn">Refresh workspace</button>
-    {% endif %}
+    <div class="btn-group">
+        {% if session.surface == "build_chat" %}
+        <button class="btn" id="refresh-workspace-btn">Refresh workspace</button>
+        {% endif %}
+        <button class="btn" id="rename-session-btn">Rename</button>
+        {% if not session.archived_at %}
+        <button class="btn btn-danger" id="archive-session-btn">Archive</button>
+        {% endif %}
+    </div>
 </div>
 
 {% if session.surface == "build_chat" and workspace_tools %}
@@ -399,6 +405,29 @@
 
     const refreshBtn = document.getElementById('refresh-workspace-btn');
     if (refreshBtn) refreshBtn.onclick = refreshWorkspace;
+
+    const archiveBtn = document.getElementById('archive-session-btn');
+    if (archiveBtn) archiveBtn.onclick = async () => {
+        if (!confirm('Archive this session? Existing messages stay readable.')) return;
+        const r = await window.lifemanFetch('/api/chat/sessions/' + sessionId, {
+            method: 'DELETE',
+        });
+        if (!r.ok) { window.toast('Archive failed', 'err'); return; }
+        location.href = '/chat?surface=' + encodeURIComponent(surface);
+    };
+
+    const renameBtn = document.getElementById('rename-session-btn');
+    if (renameBtn) renameBtn.onclick = async () => {
+        const title = prompt('New title:', {{ (session.title or '') | tojson }});
+        if (title === null) return;
+        const r = await window.lifemanFetch('/api/chat/sessions/' + sessionId, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title }),
+        });
+        if (!r.ok) { window.toast('Rename failed', 'err'); return; }
+        location.reload();
+    };
 })();
 </script>
 {% endblock %}

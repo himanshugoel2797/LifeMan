@@ -6,6 +6,43 @@
 {% block content %}
 <h1>Scheduled Invocations</h1>
 
+<details class="disclose" {% if not schedules %}open{% endif %}>
+    <summary>+ Schedule a tool invocation</summary>
+    <form class="form-grid" id="sched-form">
+        <label for="sc-tool">tool</label>
+        <input type="text" id="sc-tool" required placeholder="tool name (must already be registered)">
+
+        <label for="sc-args">args (JSON)</label>
+        <textarea id="sc-args" placeholder='{"key": "value"}'>{}</textarea>
+
+        <label for="sc-when">when</label>
+        <div>
+            <input type="text" id="sc-when" required placeholder='in 30m, 2026-05-11T09:00:00Z, or {"recur":"daily","at":"09:00"}'>
+            <div class="help">
+                Supports: duration like <code>in 30m</code> / <code>in 2h</code>, ISO-8601 timestamps,
+                or a JSON object like <code>{"recur":"daily","at":"09:00"}</code> (also <code>hourly</code>, <code>weekly</code>).
+            </div>
+        </div>
+
+        <label for="sc-context">context_refs</label>
+        <input type="text" id="sc-context" placeholder="comma-separated">
+
+        <label for="sc-reason">reason</label>
+        <input type="text" id="sc-reason" required placeholder="why this is scheduled">
+
+        <div class="submit-row">
+            <button type="submit" class="btn btn-success">Schedule</button>
+        </div>
+    </form>
+</details>
+
+<div class="filters">
+    <label>
+        <input type="checkbox" id="show-cancelled" {% if include_cancelled %}checked{% endif %}>
+        include cancelled
+    </label>
+</div>
+
 {% if schedules %}
 <table>
     <thead>
@@ -16,6 +53,7 @@
             <th>Recurrence</th>
             <th>Reason</th>
             <th>Fires</th>
+            <th>State</th>
             <th></th>
         </tr>
     </thead>
@@ -29,6 +67,8 @@
                 {% set ws = s.when_spec %}
                 {% if ws is string and ws.startswith('{') %}
                 <span class="tag tag-accent">recurring</span>
+                {% elif ws is mapping %}
+                <span class="tag tag-accent">recurring</span>
                 {% else %}
                 <span class="tag">one-shot</span>
                 {% endif %}
@@ -36,16 +76,126 @@
             <td class="reason">{{ s.reason[:40] }}</td>
             <td>{{ s.total_fires }}</td>
             <td>
-                <button class="btn btn-danger"
-                        hx-delete="/api/schedules/{{ s.id }}"
-                        hx-target="#sched-{{ s.id }}"
-                        hx-swap="outerHTML">Cancel</button>
+                {% if s.cancelled_at %}
+                <span class="tag" style="border-color:var(--danger);color:var(--danger);">cancelled</span>
+                {% else %}
+                <span class="tag tag-success">active</span>
+                {% endif %}
+            </td>
+            <td>
+                <div class="btn-group">
+                    <button class="btn" data-action="status" data-id="{{ s.id }}">Status</button>
+                    {% if not s.cancelled_at %}
+                    <button class="btn" data-action="reschedule" data-id="{{ s.id }}">Reschedule</button>
+                    <button class="btn btn-danger" data-action="cancel" data-id="{{ s.id }}">Cancel</button>
+                    {% endif %}
+                </div>
             </td>
         </tr>
         {% endfor %}
     </tbody>
 </table>
 {% else %}
-<div class="empty">No active schedules.</div>
+<div class="empty">No schedules.</div>
 {% endif %}
+
+<script>
+(function () {
+    document.getElementById('show-cancelled').addEventListener('change', (e) => {
+        location.href = e.target.checked ? '/schedules?include_cancelled=1' : '/schedules';
+    });
+
+    document.getElementById('sched-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        let args = {};
+        try {
+            const argsRaw = document.getElementById('sc-args').value.trim() || '{}';
+            args = JSON.parse(argsRaw);
+        } catch (err) {
+            window.toast('args must be valid JSON', 'err');
+            return;
+        }
+
+        // Allow `when` to be ISO, "in 30m", JSON object, or numeric seconds.
+        const whenRaw = document.getElementById('sc-when').value.trim();
+        let when = whenRaw;
+        if (whenRaw.startsWith('{')) {
+            try { when = JSON.parse(whenRaw); }
+            catch (err) { window.toast('when (JSON) is not valid', 'err'); return; }
+        } else if (/^\d+(\.\d+)?$/.test(whenRaw)) {
+            when = Number(whenRaw);
+        }
+
+        const ctxRaw = document.getElementById('sc-context').value.trim();
+        const context_refs = ctxRaw
+            ? ctxRaw.split(',').map((t) => t.trim()).filter(Boolean)
+            : [];
+
+        const body = {
+            tool: document.getElementById('sc-tool').value.trim(),
+            args, when, context_refs,
+            reason: document.getElementById('sc-reason').value.trim(),
+        };
+        const r = await window.lifemanFetch('/api/schedules', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!r.ok) {
+            const t = await r.text();
+            window.toast('Schedule failed: ' + t, 'err');
+            return;
+        }
+        window.toast('Scheduled', 'ok');
+        location.reload();
+    });
+
+    document.querySelectorAll('button[data-action="cancel"]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+            if (!confirm('Cancel this schedule?')) return;
+            const id = btn.dataset.id;
+            const r = await window.lifemanFetch('/api/schedules/' + id, { method: 'DELETE' });
+            if (!r.ok) { window.toast('Cancel failed', 'err'); return; }
+            location.reload();
+        });
+    });
+
+    document.querySelectorAll('button[data-action="reschedule"]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.id;
+            const whenRaw = prompt('New when (ISO timestamp, "in 30m", JSON, or seconds):');
+            if (!whenRaw) return;
+            let when = whenRaw.trim();
+            if (when.startsWith('{')) {
+                try { when = JSON.parse(when); }
+                catch (e) { window.toast('Invalid JSON', 'err'); return; }
+            } else if (/^\d+(\.\d+)?$/.test(when)) {
+                when = Number(when);
+            }
+            const r = await window.lifemanFetch('/api/schedules/' + id + '/reschedule', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ when }),
+            });
+            if (!r.ok) { window.toast('Reschedule failed', 'err'); return; }
+            location.reload();
+        });
+    });
+
+    document.querySelectorAll('button[data-action="status"]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+            const id = btn.dataset.id;
+            const r = await window.lifemanFetch('/api/schedules/' + id + '/status');
+            if (!r.ok) { window.toast('Could not load status', 'err'); return; }
+            const s = await r.json();
+            alert(
+                `fires_at: ${s.fires_at}\n` +
+                `last_fired: ${s.last_fired || 'never'}\n` +
+                `total_fires: ${s.total_fires}\n` +
+                `consecutive_no_ops: ${s.consecutive_no_ops}`
+            );
+        });
+    });
+})();
+</script>
 {% endblock %}

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% set active_page = "inputs" %}
+
+{% block title %}lifeman — Inputs{% endblock %}
+
+{% block content %}
+<h1>Inputs</h1>
+<p class="reason">Raw inbound events (voice, chat, watch, etc.) that the router classifies and dispatches.</p>
+
+<details class="disclose">
+    <summary>+ Ingest an input event</summary>
+    <form class="form-grid" id="in-form">
+        <label for="i-surface">surface</label>
+        <select id="i-surface">
+            <option value="api" selected>api</option>
+            <option value="chat">chat</option>
+            <option value="voice">voice</option>
+            <option value="notification_click">notification_click</option>
+            <option value="watch">watch</option>
+        </select>
+
+        <label for="i-payload">raw_payload</label>
+        <textarea id="i-payload" required></textarea>
+
+        <label for="i-intent">intent_hint</label>
+        <select id="i-intent">
+            <option value="">(none)</option>
+            <option value="invoke">invoke</option>
+            <option value="chat">chat</option>
+            <option value="command">command</option>
+        </select>
+
+        <label for="i-reason">reason</label>
+        <input type="text" id="i-reason">
+
+        <div class="submit-row">
+            <button type="submit" class="btn btn-success">Ingest</button>
+        </div>
+    </form>
+</details>
+
+<h2>Recent input events</h2>
+{% if items %}
+<table>
+    <thead>
+        <tr>
+            <th>When</th>
+            <th>Surface</th>
+            <th>Intent hint</th>
+            <th>Source</th>
+            <th>Payload</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for i in items %}
+        <tr>
+            <td class="timestamp">{{ i.emitted_at[:19] }}</td>
+            <td><span class="tag tag-accent">{{ i.surface }}</span></td>
+            <td>{{ i.intent_hint or '—' }}</td>
+            <td><span class="tag">{{ i.source }}</span></td>
+            <td style="max-width:480px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                {{ i.raw_payload[:200] }}{% if i.raw_payload|length > 200 %}…{% endif %}
+            </td>
+            <td><a class="btn" href="/api/inputs/{{ i.id }}" target="_blank">Audit</a></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No input events yet.</div>
+{% endif %}
+
+<script>
+document.getElementById('in-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = {
+        surface: document.getElementById('i-surface').value,
+        raw_payload: document.getElementById('i-payload').value,
+        intent_hint: document.getElementById('i-intent').value || null,
+        reason: document.getElementById('i-reason').value,
+        source: 'user',
+    };
+    const r = await window.lifemanFetch('/api/inputs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!r.ok) { window.toast('Ingest failed', 'err'); return; }
+    window.toast('Ingested', 'ok');
+    location.reload();
+});
+</script>
+{% endblock %}

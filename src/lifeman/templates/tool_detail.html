@@ -9,8 +9,36 @@
 <p style="margin-top: 8px;">
     <span class="tag tag-accent">{{ tool.category }}</span>
     <span class="tag">v{{ tool.version }}</span>
+    {% if tool.deprecated_at %}
+    <span class="tag" style="border-color:var(--danger);color:var(--danger);">deprecated</span>
+    {% endif %}
     <span class="timestamp">installed {{ tool.installed_at[:19] }}</span>
 </p>
+<div class="btn-group" style="margin: 12px 0;">
+    <button class="btn btn-success" id="invoke-btn">Invoke</button>
+    {% if not tool.deprecated_at %}
+    <button class="btn btn-danger" id="deprecate-btn">Deprecate</button>
+    {% endif %}
+</div>
+
+<details class="disclose" id="invoke-panel" style="display:none;">
+    <summary>Invoke tool</summary>
+    <form class="form-grid" id="invoke-form">
+        <label for="iv-args">args (JSON)</label>
+        <textarea id="iv-args">{}</textarea>
+
+        <label for="iv-reason">reason</label>
+        <input type="text" id="iv-reason" placeholder="why">
+
+        <div class="submit-row">
+            <button type="submit" class="btn btn-success">Run now</button>
+        </div>
+    </form>
+    <div id="invoke-result" style="display:none;">
+        <h2>Result</h2>
+        <pre id="invoke-result-pre"></pre>
+    </div>
+</details>
 
 <h2>Manifest</h2>
 <pre>{{ manifest | tojson(indent=2) }}</pre>
@@ -59,4 +87,55 @@
 {% else %}
 <div class="empty">No invocations yet.</div>
 {% endif %}
+
+<script>
+(function () {
+    const toolId = "{{ tool.id }}";
+    const panel = document.getElementById('invoke-panel');
+    document.getElementById('invoke-btn').addEventListener('click', () => {
+        panel.style.display = 'block';
+        panel.open = true;
+    });
+
+    const deprecateBtn = document.getElementById('deprecate-btn');
+    if (deprecateBtn) {
+        deprecateBtn.addEventListener('click', async () => {
+            if (!confirm('Mark this tool as deprecated? It will be hidden from the list.')) return;
+            const r = await window.lifemanFetch('/api/tools/' + toolId + '/deprecate', {
+                method: 'POST',
+            });
+            if (!r.ok) { window.toast('Deprecate failed', 'err'); return; }
+            window.toast('Deprecated', 'ok');
+            location.href = '/tools';
+        });
+    }
+
+    document.getElementById('invoke-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        let args;
+        try {
+            args = JSON.parse(document.getElementById('iv-args').value || '{}');
+        } catch (err) {
+            window.toast('args is not valid JSON', 'err');
+            return;
+        }
+        const reason = document.getElementById('iv-reason').value;
+        const r = await window.lifemanFetch('/api/tools/' + toolId + '/invoke', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tool: "{{ tool.name }}", args, reason }),
+        });
+        const body = await r.json();
+        const out = document.getElementById('invoke-result');
+        out.style.display = 'block';
+        document.getElementById('invoke-result-pre').textContent =
+            JSON.stringify(body, null, 2);
+        if (r.ok && !body.error) {
+            window.toast('Invocation completed', 'ok');
+        } else {
+            window.toast('Invocation failed', 'err');
+        }
+    });
+})();
+</script>
 {% endblock %}

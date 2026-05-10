@@ -6,6 +6,43 @@
 {% block content %}
 <h1>Installed Tools</h1>
 
+<details class="disclose">
+    <summary>+ Register a new tool</summary>
+    <form class="form-grid" id="tool-form">
+        <label for="t-name">name</label>
+        <input type="text" id="t-name" required pattern="^[A-Za-z0-9_]+$" placeholder="my_tool">
+
+        <label for="t-description">description</label>
+        <input type="text" id="t-description" required placeholder="What it does">
+
+        <label for="t-category">category</label>
+        <input type="text" id="t-category" value="general">
+
+        <label for="t-manifest">manifest (JSON)</label>
+        <textarea id="t-manifest">{
+  "reads": [],
+  "writes": [],
+  "network": [],
+  "compute_limits": {"timeout": 30}
+}</textarea>
+
+        <label for="t-schema-input">schema_input</label>
+        <textarea id="t-schema-input">{}</textarea>
+
+        <label for="t-schema-output">schema_output</label>
+        <textarea id="t-schema-output">{}</textarea>
+
+        <label for="t-code">code</label>
+        <textarea id="t-code" required style="min-height: 160px;" placeholder="def run(args):
+    return {'ok': True}"></textarea>
+
+        <div class="submit-row">
+            <button type="submit" class="btn btn-success">Register</button>
+            <span class="help" style="margin-left:8px;">Most tools are built in the build chat — this manual form is for power users.</span>
+        </div>
+    </form>
+</details>
+
 {% if tools %}
 {% for tool in tools %}
 <div class="card">
@@ -30,9 +67,41 @@
 </div>
 {% endfor %}
 {% else %}
-<div class="empty">
-    No tools installed yet.<br>
-    Register a tool via the API: <code>POST /api/tools</code>
-</div>
+<div class="empty">No tools installed yet. Register one above.</div>
 {% endif %}
+
+<script>
+document.getElementById('tool-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const get = (id) => document.getElementById(id).value;
+    let manifest, schema_input, schema_output;
+    try {
+        manifest = JSON.parse(get('t-manifest') || '{}');
+        schema_input = JSON.parse(get('t-schema-input') || '{}');
+        schema_output = JSON.parse(get('t-schema-output') || '{}');
+    } catch (err) {
+        window.toast('JSON parse error: ' + err.message, 'err');
+        return;
+    }
+    const body = {
+        name: get('t-name').trim(),
+        description: get('t-description').trim(),
+        category: get('t-category').trim() || 'general',
+        manifest, schema_input, schema_output,
+        code: get('t-code'),
+    };
+    const r = await window.lifemanFetch('/api/tools', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+        const t = await r.text();
+        window.toast('Register failed: ' + t, 'err');
+        return;
+    }
+    window.toast('Tool registered', 'ok');
+    location.reload();
+});
+</script>
 {% endblock %}

@@ -28,18 +28,31 @@
 {% if sessions %}
 <div class="session-list">
     {% for s in sessions %}
-    <a href="/chat/{{ s.id }}" class="session-row">
-        <div>
-            <div style="color: var(--text);">{{ s.title or s.id }}</div>
+    <div class="session-row" id="session-row-{{ s.id }}">
+        <a href="/chat/{{ s.id }}" style="flex:1; color:var(--text); text-decoration:none;">
+            <div>{{ s.title or s.id }}</div>
             <div class="reason">{{ s.message_count }} messages · last active {{ s.last_message_at[:19] }}</div>
+        </a>
+        <div class="btn-group">
+            <span class="tag">{{ s.surface }}</span>
+            <button class="btn" data-action="rename" data-id="{{ s.id }}" data-title="{{ s.title or '' }}">Rename</button>
+            <button class="btn btn-danger" data-action="archive" data-id="{{ s.id }}">Archive</button>
         </div>
-        <span class="tag">{{ s.surface }}</span>
-    </a>
+    </div>
     {% endfor %}
 </div>
 {% else %}
 <div class="empty">No sessions yet. Click "New session" to start.</div>
 {% endif %}
+
+<div id="llm-pull-panel" style="display:none; margin-top:24px;">
+    <h2>Pull model</h2>
+    <div class="filters">
+        <input type="text" id="pull-model-name" placeholder="e.g. llama3.2:3b">
+        <button class="btn btn-success" id="pull-go-btn">Pull</button>
+    </div>
+    <pre id="pull-progress" style="display:none; max-height:200px; overflow-y:auto;"></pre>
+</div>
 
 <script>
 async function refreshLlmStatus() {
@@ -51,16 +64,105 @@ async function refreshLlmStatus() {
         });
         if (!r.ok) return;
         const s = await r.json();
+        const pullPanel = document.getElementById('llm-pull-panel');
         if (!s.healthy) {
             el.innerHTML = ` <span class="tag" style="border-color: var(--danger); color: var(--danger);">Ollama down at ${s.base_url}</span>`;
         } else if (!s.model_installed) {
-            el.innerHTML = ` <span class="tag" style="border-color: var(--warning); color: var(--warning);">Model '${s.model}' not pulled — run: ollama pull ${s.model}</span>`;
+            el.innerHTML = ` <span class="tag" style="border-color: var(--warning); color: var(--warning);">Model '${s.model}' not pulled</span>`
+                + ` <button class="btn btn-success" id="quick-pull-btn">Pull ${s.model}</button>`;
+            pullPanel.style.display = 'block';
+            document.getElementById('pull-model-name').value = s.model;
+            const qpb = document.getElementById('quick-pull-btn');
+            if (qpb) qpb.addEventListener('click', () => pullModel(s.model));
         } else {
             el.innerHTML = ` <span class="tag tag-success">Ollama up · ${s.model}</span>`;
+            pullPanel.style.display = 'block';
         }
     } catch (e) { /* ignore */ }
 }
 if (document.getElementById('llm-status-line')) refreshLlmStatus();
+
+async function pullModel(name) {
+    if (!name) { window.toast('Enter a model name', 'err'); return; }
+    const out = document.getElementById('pull-progress');
+    out.style.display = 'block';
+    out.textContent = `Pulling ${name}…\n`;
+    const url = '/api/chat/llm/pull?model=' + encodeURIComponent(name);
+    const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + (window.LIFEMAN_TOKEN || '') },
+    });
+    if (!r.ok || !r.body) {
+        out.textContent += '\nPull failed (HTTP ' + r.status + ')';
+        return;
+    }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const lines = frame.split('\n');
+            const evt = (lines.find((l) => l.startsWith('event:')) || '').slice(6).trim();
+            const data = (lines.find((l) => l.startsWith('data:')) || '').slice(5).trim();
+            if (evt === 'progress' && data) {
+                try {
+                    const j = JSON.parse(data);
+                    out.textContent += (j.status || JSON.stringify(j)) + '\n';
+                } catch { out.textContent += data + '\n'; }
+            } else if (evt === 'done') {
+                out.textContent += '\n— done\n';
+                window.toast('Model pulled', 'ok');
+                refreshLlmStatus();
+                return;
+            } else if (evt === 'error') {
+                out.textContent += '\n— error: ' + data + '\n';
+                window.toast('Pull failed', 'err');
+                return;
+            }
+            out.scrollTop = out.scrollHeight;
+        }
+    }
+}
+
+document.getElementById('pull-go-btn').addEventListener('click', () => {
+    pullModel(document.getElementById('pull-model-name').value.trim());
+});
+
+document.querySelectorAll('button[data-action="archive"]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!confirm('Archive this session?')) return;
+        const id = btn.dataset.id;
+        const r = await window.lifemanFetch('/api/chat/sessions/' + id, { method: 'DELETE' });
+        if (!r.ok) { window.toast('Archive failed', 'err'); return; }
+        document.getElementById('session-row-' + id)?.remove();
+        window.toast('Archived', 'ok');
+    });
+});
+
+document.querySelectorAll('button[data-action="rename"]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const title = prompt('New title:', btn.dataset.title || '');
+        if (title === null) return;
+        const r = await window.lifemanFetch('/api/chat/sessions/' + id, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title }),
+        });
+        if (!r.ok) { window.toast('Rename failed', 'err'); return; }
+        location.reload();
+    });
+});
 
 document.getElementById('new-session-btn').addEventListener('click', async () => {
     const r = await fetch('/api/chat/sessions', {
