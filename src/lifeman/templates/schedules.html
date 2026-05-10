@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% set active_page = "schedules" %}
+
+{% block title %}lifeman — Schedules{% endblock %}
+
+{% block content %}
+<h1>Scheduled Invocations</h1>
+
+{% if schedules %}
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Tool</th>
+            <th>Fires At</th>
+            <th>Recurrence</th>
+            <th>Reason</th>
+            <th>Fires</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in schedules %}
+        <tr id="sched-{{ s.id }}">
+            <td><code>{{ s.id }}</code></td>
+            <td>{{ s.tool }}</td>
+            <td class="timestamp">{{ s.fires_at[:19] }}</td>
+            <td>
+                {% set ws = s.when_spec %}
+                {% if ws is string and ws.startswith('{') %}
+                <span class="tag tag-accent">recurring</span>
+                {% else %}
+                <span class="tag">one-shot</span>
+                {% endif %}
+            </td>
+            <td class="reason">{{ s.reason[:40] }}</td>
+            <td>{{ s.total_fires }}</td>
+            <td>
+                <button class="btn btn-danger"
+                        hx-delete="/api/schedules/{{ s.id }}"
+                        hx-target="#sched-{{ s.id }}"
+                        hx-swap="outerHTML">Cancel</button>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No active schedules.</div>
+{% endif %}
+{% endblock %}

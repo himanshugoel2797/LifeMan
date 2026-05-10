@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% set active_page = "tools" %}
+
+{% block title %}lifeman — {{ tool.name }}{% endblock %}
+
+{% block content %}
+<h1>{{ tool.name }}</h1>
+<p>{{ tool.description }}</p>
+<p style="margin-top: 8px;">
+    <span class="tag tag-accent">{{ tool.category }}</span>
+    <span class="tag">v{{ tool.version }}</span>
+    <span class="timestamp">installed {{ tool.installed_at[:19] }}</span>
+</p>
+
+<h2>Manifest</h2>
+<pre>{{ manifest | tojson(indent=2) }}</pre>
+
+<h2>Code</h2>
+<pre>{{ code }}</pre>
+
+<h2>Recent Invocations</h2>
+{% if invocations %}
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Source</th>
+            <th>Started</th>
+            <th>Status</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for inv in invocations %}
+        <tr>
+            <td><code>{{ inv.id }}</code></td>
+            <td><span class="tag">{{ inv.source }}</span></td>
+            <td class="timestamp">{{ inv.started_at[:19] }}</td>
+            <td>
+                {% if inv.error %}
+                <span class="tag" style="border-color: var(--danger); color: var(--danger);">error</span>
+                {% elif inv.finished_at %}
+                <span class="tag tag-success">ok</span>
+                {% else %}
+                <span class="tag tag-warning">running</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No invocations yet.</div>
+{% endif %}
+{% endblock %}

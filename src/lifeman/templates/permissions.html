@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% set active_page = "permissions" %}
+
+{% block title %}lifeman — Permissions{% endblock %}
+
+{% block content %}
+<h1>Permissions</h1>
+
+<h2>Pending Requests</h2>
+{% if pending %}
+{% for req in pending %}
+<div class="card" id="perm-{{ req.id }}">
+    <div class="card-header">
+        <span class="card-title">{{ req.capability }}</span>
+        <span class="tag">{{ req.requester }}</span>
+    </div>
+    <div class="reason">{{ req.reason }}</div>
+    <div style="margin-top: 12px;" class="btn-group">
+        <button class="btn btn-success"
+                hx-post="/api/permissions/{{ req.id }}/resolve"
+                hx-vals='{"action": "allow_once"}'
+                hx-headers='{"Content-Type": "application/json"}'
+                hx-target="#perm-{{ req.id }}"
+                hx-swap="outerHTML">Allow Once</button>
+        <button class="btn btn-success"
+                hx-post="/api/permissions/{{ req.id }}/resolve"
+                hx-vals='{"action": "allow_always"}'
+                hx-headers='{"Content-Type": "application/json"}'
+                hx-target="#perm-{{ req.id }}"
+                hx-swap="outerHTML">Allow Always</button>
+        <button class="btn btn-danger"
+                hx-post="/api/permissions/{{ req.id }}/resolve"
+                hx-vals='{"action": "deny"}'
+                hx-headers='{"Content-Type": "application/json"}'
+                hx-target="#perm-{{ req.id }}"
+                hx-swap="outerHTML">Deny</button>
+    </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="empty">No pending permission requests.</div>
+{% endif %}
+
+<h2>Active Grants</h2>
+{% if grants %}
+<table>
+    <thead>
+        <tr>
+            <th>Grantee</th>
+            <th>Capability</th>
+            <th>Granted</th>
+            <th>Expires</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for g in grants %}
+        <tr id="grant-{{ g.id }}">
+            <td><span class="tag">{{ g.grantee }}</span></td>
+            <td>{{ g.capability }}</td>
+            <td class="timestamp">{{ g.granted_at[:19] }}</td>
+            <td class="timestamp">{{ g.expires_at or 'never' }}</td>
+            <td>
+                <button class="btn btn-danger"
+                        hx-delete="/api/permissions/{{ g.id }}"
+                        hx-target="#grant-{{ g.id }}"
+                        hx-swap="outerHTML">Revoke</button>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No active permission grants.</div>
+{% endif %}
+{% endblock %}

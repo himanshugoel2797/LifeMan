@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% set active_page = "index" %}
+
+{% block title %}lifeman — Dashboard{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stat-grid">
+    <div class="stat">
+        <div class="stat-value">{{ tool_count }}</div>
+        <div class="stat-label">Installed Tools</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ pending_permissions }}</div>
+        <div class="stat-label">Pending Permissions</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ active_schedules }}</div>
+        <div class="stat-label">Active Schedules</div>
+    </div>
+</div>
+
+<h2>Recent Activity</h2>
+{% if recent_audit %}
+<table>
+    <thead>
+        <tr>
+            <th>Time</th>
+            <th>Source</th>
+            <th>Action</th>
+            <th>Target</th>
+            <th>Reason</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for entry in recent_audit %}
+        <tr>
+            <td class="timestamp">{{ entry.timestamp[:19] }}</td>
+            <td><span class="tag">{{ entry.source }}</span></td>
+            <td>{{ entry.action }}</td>
+            <td>{{ entry.target }}</td>
+            <td class="reason">{{ entry.reason[:60] }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No activity yet. Register a tool to get started.</div>
+{% endif %}
+{% endblock %}

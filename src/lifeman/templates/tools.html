@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% set active_page = "tools" %}
+
+{% block title %}lifeman — Tools{% endblock %}
+
+{% block content %}
+<h1>Installed Tools</h1>
+
+{% if tools %}
+{% for tool in tools %}
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">
+            <a href="/tools/{{ tool.id }}" style="color: var(--accent); text-decoration: none;">{{ tool.name }}</a>
+        </span>
+        <span>
+            <span class="tag tag-accent">{{ tool.category }}</span>
+            <span class="tag">v{{ tool.version }}</span>
+        </span>
+    </div>
+    <div>{{ tool.description }}</div>
+    <div style="margin-top: 8px; font-size: 12px; color: var(--text-dim);">
+        {% if tool.manifest %}
+        reads: {{ tool.manifest.get('reads', [])|length }}
+        &middot; writes: {{ tool.manifest.get('writes', [])|length }}
+        &middot; network: {{ tool.manifest.get('network', [])|length }}
+        {% endif %}
+        &middot; installed {{ tool.installed_at[:10] }}
+    </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="empty">
+    No tools installed yet.<br>
+    Register a tool via the API: <code>POST /api/tools</code>
+</div>
+{% endif %}
+{% endblock %}
