@@ -250,16 +250,39 @@ async def test_state_set_oversized_value_rejected(temp_db):
 
 
 @pytest.mark.asyncio
-async def test_state_set_non_serialisable_rejected(temp_db):
-    # `{"v": object()}` would be unserialisable, but the socket caller can
-    # only send JSON itself — exercise the error path by sending a payload
-    # whose value contains a NaN-like construct rejected by json.dumps. The
-    # easiest reliable case: request a missing key.
+async def test_state_set_missing_value_rejected(temp_db):
+    """state_set must reject params that omit `value` entirely."""
     async with ToolSocket("inv-1", "tool-x", "test", None) as ts:
         [resp] = await _send_recv(
             str(ts.socket_path), {"method": "state_set", "params": {"key": "k"}},
         )
     assert "error" in resp and "missing 'value'" in resp["error"]
+
+
+@pytest.mark.asyncio
+async def test_state_set_non_serialisable_rejected(temp_db, monkeypatch):
+    """A value that survives the wire JSON parse but fails re-serialisation
+    must surface a clear error. We force the TypeError branch by patching
+    `json.dumps` inside the tool_socket module so it raises for our probe.
+    """
+    from lifeman import tool_socket as ts_mod
+
+    real_dumps = ts_mod.json.dumps
+
+    def fake_dumps(obj, *a, **kw):
+        if isinstance(obj, dict) and obj.get("__poison__") is True:
+            raise TypeError("Object of type X is not JSON serializable")
+        return real_dumps(obj, *a, **kw)
+
+    monkeypatch.setattr(ts_mod.json, "dumps", fake_dumps)
+
+    async with ToolSocket("inv-1", "tool-x", "test", None) as ts:
+        [resp] = await _send_recv(
+            str(ts.socket_path),
+            {"method": "state_set", "params": {"key": "k", "value": {"__poison__": True}}},
+        )
+    assert "error" in resp
+    assert "not JSON-serialisable" in resp["error"]
 
 
 # ---------------------------------------------------------------------------

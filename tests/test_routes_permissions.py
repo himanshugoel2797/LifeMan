@@ -145,6 +145,8 @@ async def test_pending_list_shape_and_excludes_resolved(http_client):
     assert empty.status_code == 200
     assert empty.json() == []
 
+    import asyncio
+
     ids = []
     for i in range(3):
         r = await http_client.post("/api/permissions/request", json={
@@ -153,6 +155,9 @@ async def test_pending_list_shape_and_excludes_resolved(http_client):
             "reason": f"r{i}",
         })
         ids.append(r.json()["id"])
+        # Force monotonically distinct requested_at values so the DESC
+        # ordering assertion below is deterministic.
+        await asyncio.sleep(0.01)
 
     # Resolve the middle one — it should drop out of /pending.
     await http_client.post(f"/api/permissions/{ids[1]}/resolve", json={"action": "deny"})
@@ -162,7 +167,11 @@ async def test_pending_list_shape_and_excludes_resolved(http_client):
     rows = pending.json()
     returned_ids = [r["id"] for r in rows]
     assert ids[1] not in returned_ids
-    assert set(ids) - {ids[1]} <= set(returned_ids)
+    # Ordering is most-recent-first (the route ORDERs BY requested_at DESC).
+    # Pin it: dropping that ORDER BY clause should fail this assertion.
+    assert returned_ids == [ids[2], ids[0]], (
+        f"expected DESC requested_at ordering, got {returned_ids}"
+    )
 
     # Shape: every record carries the documented PermissionRequestRecord keys.
     sample = next(r for r in rows if r["id"] == ids[0])

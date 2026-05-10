@@ -181,12 +181,31 @@ async def test_reconcile_crashed_fires_resets_orphaned_rows(temp_db):
     assert clean["fires_at"] == future
 
 
-@pytest.mark.asyncio
-async def test_compute_next_fire_today_or_tomorrow_branch():
+def test_compute_next_fire_today_or_tomorrow_branch(monkeypatch):
     """The fix from REVIEW: a daily 23:00 fired at 01:00 picks today's 23:00,
-    not tomorrow's. We can't time-travel, so simulate by checking that the
-    returned timestamp is no more than 24h ahead."""
-    nxt = scheduler._compute_next_fire(json.dumps({"recur": "daily", "at": "08:00"}))
-    assert nxt is not None
-    delta = datetime.fromisoformat(nxt) - datetime.now(timezone.utc)
-    assert timedelta() < delta <= timedelta(days=1)
+    not tomorrow's. We freeze the clock so the today-vs-tomorrow regression
+    would actually fail this assertion (a generic <=24h check would not).
+    """
+    from lifeman import scheduler as sched_mod
+
+    fixed_now = datetime(2026, 5, 10, 1, 0, 0, tzinfo=timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(sched_mod, "datetime", _FrozenDatetime)
+
+    # Daily at 23:00, "now" is 01:00 → next fire must be TODAY 23:00, not
+    # tomorrow.
+    nxt = scheduler._compute_next_fire(json.dumps({"recur": "daily", "at": "23:00"}))
+    parsed = datetime.fromisoformat(nxt)
+    assert parsed == datetime(2026, 5, 10, 23, 0, 0, tzinfo=timezone.utc), (
+        f"expected today 23:00, got {parsed.isoformat()}"
+    )
+
+    # Daily at 00:30, "now" is 01:00 → already passed → tomorrow 00:30.
+    nxt2 = scheduler._compute_next_fire(json.dumps({"recur": "daily", "at": "00:30"}))
+    parsed2 = datetime.fromisoformat(nxt2)
+    assert parsed2 == datetime(2026, 5, 11, 0, 30, 0, tzinfo=timezone.utc)

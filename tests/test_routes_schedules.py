@@ -292,6 +292,8 @@ async def test_reschedule_400_for_invalid_when(http_client):
 
 @pytest.mark.asyncio
 async def test_cancel_schedule_is_idempotent(http_client):
+    """Cancelling an existing schedule twice succeeds — the second call sets
+    `cancelled_at` to a fresh timestamp but does not error."""
     await _register_tool(http_client)
     r = await http_client.post("/api/schedules", json={
         "tool": "noop_tool", "args": {}, "when": "1h", "reason": "t",
@@ -303,10 +305,11 @@ async def test_cancel_schedule_is_idempotent(http_client):
 
 
 @pytest.mark.asyncio
-async def test_cancel_unknown_id_still_200(http_client):
-    # The route runs an UPDATE that touches zero rows — no 404 raised.
+async def test_cancel_unknown_id_returns_404(http_client):
+    """Cancelling a non-existent schedule must 404 — silently swallowing the
+    miss would mask client bugs (typoed ids, stale UI state)."""
     r = await http_client.delete("/api/schedules/does-not-exist")
-    assert r.status_code == 200
+    assert r.status_code == 404
 
 
 # ---------------------------------------------------------------------------

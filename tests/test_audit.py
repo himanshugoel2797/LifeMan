@@ -197,16 +197,26 @@ async def test_load_audit_and_dispatches_shapes(temp_db):
 
 
 @pytest.mark.asyncio
-async def test_load_audit_and_dispatches_filters_by_event_and_orders(temp_db):
+async def test_load_audit_and_dispatches_filters_by_event_and_orders_by_insertion(temp_db):
+    """The loader returns rows ORDER BY id ASC (insertion order), regardless
+    of decided_at. We pin that contract by inserting decided_at out of order
+    and asserting the result still comes back in insertion order.
+
+    A future change to ORDER BY decided_at would flip the assertion below —
+    that's intentional. Make the change deliberate, not silent.
+    """
+    # Insert with decided_at in REVERSED order: row inserted first has the
+    # *later* decided_at. ORDER BY id will return them in insertion order
+    # (later decided_at first); ORDER BY decided_at would return the opposite.
     await _insert_audit(temp_db, "memory_routing_audit", "e1", notes="first",
-                        decided_at="2024-01-01T00:00:00+00:00")
-    await _insert_audit(temp_db, "memory_routing_audit", "e1", notes="second",
                         decided_at="2024-01-02T00:00:00+00:00")
+    await _insert_audit(temp_db, "memory_routing_audit", "e1", notes="second",
+                        decided_at="2024-01-01T00:00:00+00:00")
     await _insert_audit(temp_db, "memory_routing_audit", "e2", notes="other")
     await _insert_dispatch(temp_db, "memory_dispatches", "e1", "ha",
-                           when="2024-01-01T00:00:00+00:00")
-    await _insert_dispatch(temp_db, "memory_dispatches", "e1", "hb",
                            when="2024-01-02T00:00:00+00:00")
+    await _insert_dispatch(temp_db, "memory_dispatches", "e1", "hb",
+                           when="2024-01-01T00:00:00+00:00")
     await _insert_dispatch(temp_db, "memory_dispatches", "e2", "hz")
     await temp_db.commit()
 
@@ -215,8 +225,18 @@ async def test_load_audit_and_dispatches_filters_by_event_and_orders(temp_db):
         dispatch_table="memory_dispatches",
         event_id="e1",
     )
+    # Filter: e2 rows excluded.
     assert [a["notes"] for a in out["routing_audit"]] == ["first", "second"]
+    # Ordering: insertion order, which here is decided_at DESC. Pin both.
+    assert [a["decided_at"] for a in out["routing_audit"]] == [
+        "2024-01-02T00:00:00+00:00",
+        "2024-01-01T00:00:00+00:00",
+    ]
     assert [d["handler"] for d in out["dispatches"]] == ["ha", "hb"]
+    assert [d["dispatched_at"] for d in out["dispatches"]] == [
+        "2024-01-02T00:00:00+00:00",
+        "2024-01-01T00:00:00+00:00",
+    ]
 
 
 @pytest.mark.asyncio

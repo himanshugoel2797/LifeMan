@@ -86,18 +86,32 @@ async def test_invoke_now_tool_through_mcp():
 async def test_invoke_passes_arguments_through(temp_db):
     """When MCP supplies an `arguments` payload, the handler must see it.
 
-    `record_memory` is a good probe: it requires a `text` field, so we can
-    confirm the dict reaches the handler by observing a successful write.
+    Probe: record_memory with a unique content string, then read it back from
+    the DB. If the args dict were dropped on the floor (or shadowed by a
+    wrong key), the row would have empty content and the assertion would fail.
     """
+    from lifeman.db import get_db
+
+    probe = "mcp-roundtrip-probe-7f3a2c"
     result = await mcp.call_tool(
         "record_memory",
-        {"arguments": {"text": "mcp roundtrip probe"}},
+        {"arguments": {"content": probe, "type_hint": "note", "tags": ["mcp_probe"]}},
     )
     payload = _extract_payload(result)
-    # Handler dispatches an event and returns its id; absence of `error` plus
-    # an `event_id` is the success contract.
     assert "error" not in payload, payload
-    assert payload.get("event_id")
+    event_id = payload.get("event_id")
+    assert event_id
+
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT content, type_hint, tags_json FROM memory_events WHERE id = ?",
+        (event_id,),
+    )
+    row = await cur.fetchone()
+    assert row is not None, "record_memory did not persist a row"
+    assert row[0] == probe, f"content not threaded through: {row[0]!r}"
+    assert row[1] == "note"
+    assert "mcp_probe" in (row[2] or "")
 
 
 @pytest.mark.asyncio
@@ -130,19 +144,19 @@ async def test_unknown_tool_raises_tool_error():
 
 
 # ---------------------------------------------------------------------------
-# Auth
+# Transport
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_server_has_no_http_auth_surface():
-    """The MCP server is stdio-only — there is no bearer-token gate to test.
+def test_mcp_server_uses_stdio_transport():
+    """Pin the stdio-only contract by inspecting the actual `mcp.run` call.
 
-    This is documented as a non-goal: the transport is stdio (`mcp.run(
-    transport='stdio')` in `main()`), so authentication is delegated to the
-    parent process that spawned us (e.g. Claude Desktop). We pin that
-    invariant here so a future switch to HTTP transport forces revisiting
-    these tests.
+    A future change that swaps to HTTP/SSE transport must explicitly revisit
+    auth (the stdio transport delegates auth to the spawning process). We
+    assert on the bytecode/source of `main`, not its docstring.
     """
+    import inspect
     from lifeman import mcp_server as mod
-    src = mod.main.__doc__ or ""
-    assert "stdio" in src.lower()
+
+    src = inspect.getsource(mod.main)
+    assert 'transport="stdio"' in src or "transport='stdio'" in src

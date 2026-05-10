@@ -117,6 +117,72 @@ async def test_installed_memory_handler_discoverable(temp_db, tmp_path):
     assert any(name == "external_memory" for name, _, _ in found)
 
 
+# A router that always routes to the installed external handler. Combined
+# with the handler tool above, this proves the discovered handler actually
+# receives the `store` invocation — not just that discovery returned a row.
+ROUTE_TO_EXTERNAL_ROUTER = """
+import json, sys
+sys.stdout.write(json.dumps({
+    "matched_rules": [1],
+    "candidate_handlers": ["external_memory"],
+    "filtered": {},
+    "dispatched": ["external_memory"],
+    "expired": False,
+    "notes": "route everything to external_memory",
+}))
+"""
+
+
+@pytest.mark.asyncio
+async def test_installed_memory_handler_actually_receives_store_invocation(
+    temp_db, tmp_path,
+):
+    """End-to-end proof: a custom router targets a custom handler, and the
+    handler's response is recorded in `memory_dispatches.external_id`. The
+    handler returns `delivery_id="custom-<event_id>"`; if the handler were
+    never invoked, no such row would exist.
+    """
+    settings.data_dir = tmp_path
+    settings.sandbox_enabled = False
+
+    await _install_tool(
+        "external_memory",
+        CUSTOM_MEMORY_HANDLER,
+        {
+            "role": MEMORY_DOMAIN.handler_role,
+            "memory_writer": {
+                "handler_type": "external_store",
+                "sensitivity_tolerance": "private",
+            },
+        },
+    )
+    await _install_tool(
+        "test_route_to_external",
+        ROUTE_TO_EXTERNAL_ROUTER,
+        {"role": MEMORY_DOMAIN.router_role},
+    )
+
+    res = await record_memory(
+        content="long enough memory candidate to clear the short-content rule",
+        type_hint="episodic",
+        reason="t",
+    )
+    assert res.dispatched == ["external_memory"]
+
+    dispatches = await temp_db.execute_fetchall(
+        "SELECT handler, ok, external_id FROM memory_dispatches "
+        "WHERE event_id = ?",
+        (res.event_id,),
+    )
+    assert len(dispatches) == 1
+    row = dispatches[0]
+    assert row["handler"] == "external_memory"
+    assert row["ok"] == 1
+    assert row["external_id"] == f"custom-{res.event_id}", (
+        "handler did not actually run with the event payload"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Roles are domain-namespaced — no cross-domain collision
 # ---------------------------------------------------------------------------

@@ -154,6 +154,9 @@ async def reschedule(sched_id: str, body: Reschedule, _: str = Depends(require_a
 @router.delete("/{sched_id}", response_model=OkResponse)
 async def cancel_schedule(sched_id: str, reason: str = "", _: str = Depends(require_auth)):
     db = await get_db()
+    rows = await db.execute_fetchall("SELECT id FROM schedules WHERE id = ?", (sched_id,))
+    if not rows:
+        raise HTTPException(404, "Schedule not found")
     now = datetime.now(timezone.utc).isoformat()
     await db.execute("UPDATE schedules SET cancelled_at = ? WHERE id = ?", (now, sched_id))
     await db.commit()

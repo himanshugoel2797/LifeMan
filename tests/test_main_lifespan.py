@@ -64,7 +64,8 @@ async def test_lifespan_startup_and_shutdown_clean(lifespan_env):
         # DB was opened during startup.
         assert db_mod._db is not None
         # Scheduler registered itself.
-        assert scheduler._task is not None or scheduler._started
+        assert scheduler._task is not None
+        assert not scheduler._task.done(), "scheduler task crashed during startup"
 
     # After shutdown the DB cache should be cleared.
     assert db_mod._db is None
@@ -139,14 +140,29 @@ async def test_loopback_enforcement_rejects_non_loopback_host():
 
 @pytest.mark.asyncio
 async def test_static_and_routers_mounted():
-    """Smoke-test the app object: static mount, and both routers attached."""
+    """Pin specific load-bearing routes are wired into the app.
+
+    Asserting on individual paths catches accidental router-removal regressions
+    that a generic "any /api/*" check would silently let through.
+    """
     from lifeman.main import app
 
     paths = {getattr(r, "path", None) for r in app.routes}
-    # Static mount is added with path '/static'.
     assert "/static" in paths
-    # API + UI routers contribute many paths; just confirm at least one /api/*.
-    assert any(p and p.startswith("/api/") for p in paths)
+
+    # Each of these is a contract surface (UI, scheduler, tool runtime,
+    # permissions UI, secrets UI, observability). If any goes missing, a
+    # client integration breaks — fail loud here.
+    expected_api = {
+        "/api/system/status",
+        "/api/schedules",
+        "/api/tools",
+        "/api/permissions/pending",
+        "/api/secrets",
+        "/api/audit",
+    }
+    missing = expected_api - paths
+    assert not missing, f"expected API routes missing: {sorted(missing)}"
 
 
 @pytest.mark.asyncio
