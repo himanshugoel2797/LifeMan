@@ -182,6 +182,69 @@ async def _handle_recall(args: dict) -> dict:
     return {"memories": [m.model_dump() for m in mems]}
 
 
+async def _handle_get_memory(args: dict) -> dict:
+    from lifeman.memory import get_memory
+
+    mem_id = args.get("id")
+    if not mem_id:
+        return {"error": "missing 'id'"}
+    mem = await get_memory(mem_id)
+    if mem is None:
+        return {"error": "memory not found"}
+    return mem.model_dump()
+
+
+async def _handle_update_memory(args: dict) -> dict:
+    from lifeman.memory import update_memory
+
+    mem_id = args.get("id")
+    if not mem_id:
+        return {"error": "missing 'id'"}
+    content = args.get("content")
+    tags = args.get("tags")
+    if content is None and tags is None:
+        return {"error": "nothing to update; provide content or tags"}
+    ok = await update_memory(
+        mem_id, content=content, tags=tags,
+        reason=args.get("reason", ""), actor="llm",
+    )
+    if not ok:
+        return {"error": "memory not found"}
+    return {"ok": True}
+
+
+async def _handle_forget(args: dict) -> dict:
+    from lifeman.memory import forget
+
+    mem_id = args.get("id")
+    if not mem_id:
+        return {"error": "missing 'id'"}
+    ok = await forget(mem_id, reason=args.get("reason", ""), actor="llm")
+    if not ok:
+        return {"error": "memory not found"}
+    return {"ok": True}
+
+
+async def _handle_forget_matching(args: dict) -> dict:
+    from lifeman.memory import forget_matching
+
+    query = args.get("query")
+    if not query:
+        return {"error": "missing 'query'"}
+    # Default to dry-run; pattern deletion needs explicit second call.
+    dry_run = args.get("dry_run", True)
+    matches = await forget_matching(
+        query, dry_run=bool(dry_run),
+        reason=args.get("reason", ""), actor="llm",
+        limit=int(args.get("limit", 200)),
+    )
+    return {
+        "dry_run": bool(dry_run),
+        "deleted": (not dry_run) and bool(matches),
+        "matches": [m.model_dump() for m in matches],
+    }
+
+
 async def _handle_observe(args: dict) -> dict:
     from lifeman.observations import observe
 
@@ -403,6 +466,69 @@ async def _handle_request_permission(args: dict) -> dict:
         target=args.get("capability", ""), reason=args.get("reason", ""),
     )
     return {"id": pid, "status": "pending"}
+
+
+async def _handle_revoke_my_permission(args: dict) -> dict:
+    """Voluntarily drop an LLM permission grant. Anti-creep, per DESIGN.MD."""
+    capability = args.get("capability")
+    if not capability:
+        return {"error": "missing 'capability'"}
+    db = await get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    rows = await db.execute_fetchall(
+        "SELECT id FROM permissions "
+        "WHERE grantee = 'llm' AND capability = ? AND revoked_at IS NULL",
+        (capability,),
+    )
+    if not rows:
+        return {"error": f"no active grant for {capability!r}"}
+    ids = [r["id"] for r in rows]
+    placeholders = ",".join("?" * len(ids))
+    await db.execute(
+        f"UPDATE permissions SET revoked_at = ? WHERE id IN ({placeholders})",
+        [now, *ids],
+    )
+    await db.commit()
+    await audit.log(
+        source="llm", action="revoke_my_permission", target=capability,
+        reason=args.get("reason", "self-revoke"),
+    )
+    return {"ok": True, "revoked": len(ids)}
+
+
+async def _handle_get_invocation(args: dict) -> dict:
+    """Look up an invocation by id — status, result, error."""
+    inv_id = args.get("id") or args.get("invocation_id")
+    if not inv_id:
+        return {"error": "missing 'id'"}
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT id, tool, source, status, args_json, result_json, error, "
+        "started_at, finished_at, schedule_id, session_id, "
+        "parent_invocation_id, reason FROM invocations WHERE id = ?",
+        (inv_id,),
+    )
+    if not rows:
+        return {"error": "invocation not found"}
+    r = dict(rows[0])
+    try:
+        args_obj = json.loads(r["args_json"]) if r.get("args_json") else {}
+    except json.JSONDecodeError:
+        args_obj = {}
+    try:
+        result_obj = json.loads(r["result_json"]) if r.get("result_json") else None
+    except json.JSONDecodeError:
+        result_obj = None
+    return {
+        "id": r["id"], "tool": r["tool"], "source": r["source"],
+        "status": r.get("status") or "completed",
+        "args": args_obj, "result": result_obj, "error": r.get("error"),
+        "started_at": r["started_at"], "finished_at": r.get("finished_at"),
+        "schedule_id": r.get("schedule_id"),
+        "session_id": r.get("session_id"),
+        "parent_invocation_id": r.get("parent_invocation_id"),
+        "reason": r.get("reason") or "",
+    }
 
 
 async def _handle_my_permissions(_: dict) -> dict:
@@ -676,6 +802,66 @@ SPECS: dict[str, tuple[dict, Callable[[dict], Awaitable[dict]]]] = {
         ),
         _handle_recall,
     ),
+    "get_memory": (
+        _fn(
+            "get_memory",
+            "Fetch a single stored memory by id.",
+            {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+        ),
+        _handle_get_memory,
+    ),
+    "update_memory": (
+        _fn(
+            "update_memory",
+            "Edit an existing memory's content and/or tags. Provide at least one.",
+            {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "content": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "reason": {"type": "string"},
+                },
+                "required": ["id"],
+            },
+        ),
+        _handle_update_memory,
+    ),
+    "forget": (
+        _fn(
+            "forget",
+            "Delete a single memory by id. Always include a reason.",
+            {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["id", "reason"],
+            },
+        ),
+        _handle_forget,
+    ),
+    "forget_matching": (
+        _fn(
+            "forget_matching",
+            "Find or delete memories whose content matches `query`. Defaults to "
+            "dry_run=true: returns the candidate list without deleting. Call "
+            "again with dry_run=false to actually remove them — pattern-based "
+            "deletion deliberately requires an explicit second call.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "dry_run": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        ),
+        _handle_forget_matching,
+    ),
     "observe": (
         _fn(
             "observe",
@@ -840,6 +1026,35 @@ SPECS: dict[str, tuple[dict, Callable[[dict], Awaitable[dict]]]] = {
             {"type": "object", "properties": {}},
         ),
         _handle_my_permissions,
+    ),
+    "revoke_my_permission": (
+        _fn(
+            "revoke_my_permission",
+            "Voluntarily drop a standing permission grant. Use to shed "
+            "capabilities you no longer need (anti-creep).",
+            {
+                "type": "object",
+                "properties": {
+                    "capability": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["capability"],
+            },
+        ),
+        _handle_revoke_my_permission,
+    ),
+    "get_invocation": (
+        _fn(
+            "get_invocation",
+            "Look up an invocation by id and return its status, args, "
+            "result, and error.",
+            {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        ),
+        _handle_get_invocation,
     ),
     "current_session": (
         _fn(

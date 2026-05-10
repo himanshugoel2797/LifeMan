@@ -139,6 +139,10 @@ Endpoints in one place:
 | inputs | `GET /api/inputs` / `GET /api/inputs/{id}` | history + audit |
 | memory | `POST /api/memory` | record_memory |
 | memory | `GET /api/memory` | recall (tag filter is AND across requested tags) |
+| memory | `GET /api/memory/{id}` | fetch a stored memory |
+| memory | `PATCH /api/memory/{id}` | update content/tags |
+| memory | `DELETE /api/memory/{id}` | forget a single memory |
+| memory | `POST /api/memory/forget_matching` | pattern-delete (`dry_run` default true) |
 | memory | `GET /api/memory/events/{id}` | event audit |
 | observations | `POST /api/observations` | observe |
 | observations | `GET /api/observations` / `GET /api/observations/events/{id}` | history + audit |
@@ -188,8 +192,9 @@ loop:
    browser can leave the "thinking" state.
 
 The tool surface visible to the LLM is in `chat_tools.SPECS` — about
-30 functions covering scheduling, invocation, output emission, memory,
-observations, inputs, permissions, system queries.
+35 functions covering scheduling, invocation (sync + lookup by id),
+output emission, memory (record/recall + get/update/forget/forget_matching),
+observations, inputs, permissions (request/list/revoke), system queries.
 
 When an input event is routed to the `llm` handler, a *background*
 chat turn is driven via [inputs/handlers.py](src/lifeman/inputs/handlers.py)

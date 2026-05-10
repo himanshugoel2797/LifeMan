@@ -110,6 +110,7 @@ REVIEW.md.
 - [`inputs.py`](src/lifeman/routes/inputs.py) — `POST /api/inputs`
   (ingest), list, and one-event detail with audit + dispatches.
 - [`memory.py`](src/lifeman/routes/memory.py) — record_memory / recall /
+  get-by-id / update / delete / forget_matching (dry-run default) /
   one-event detail with audit + dispatches.
 - [`observations.py`](src/lifeman/routes/observations.py) — observe /
   list / one-event detail.
@@ -226,10 +227,12 @@ REVIEW.md.
 ## `memory/` — third domain
 
 - [`__init__.py`](src/lifeman/memory/__init__.py) — `MEMORY_DOMAIN`,
-  `engine`, public `record_memory(...)` and `recall(...)`. Recall is a
-  plain `LIKE` search with optional type / tag / time filters; tag
-  filter uses **AND** semantics (every requested tag must be present
-  on the memory).
+  `engine`, public `record_memory(...)` and `recall(...)`, plus direct
+  CRUD over the `memories` table: `get_memory(id)`, `update_memory(id,
+  content?, tags?)`, `forget(id, reason)`, `forget_matching(query,
+  dry_run=True)`. Recall is a plain `LIKE` search with optional type /
+  tag / time filters; tag filter uses **AND** semantics (every
+  requested tag must be present on the memory).
 - [`models.py`](src/lifeman/memory/models.py) — `MemoryEvent`,
   `RecordMemoryRequest`/`Response`, `Memory` row shape.
 - [`router.py`](src/lifeman/memory/router.py) — built-in policy:

@@ -26,9 +26,11 @@ from lifeman.chat_tools import SPECS, dispatch, tool_specs
 EXPECTED_TOOLS = {
     "now", "list_tools", "invoke", "schedule", "list_scheduled",
     "notify", "emit_output", "list_secrets", "record_memory", "recall",
+    "get_memory", "update_memory", "forget", "forget_matching",
     "observe", "ingest_input", "cancel_output", "request_build", "audit_log",
     "describe_tool", "get_scheduled", "update_context", "reschedule",
     "cancel", "recurrence_status", "request_permission", "my_permissions",
+    "revoke_my_permission", "get_invocation",
     "current_session", "user_status", "system_status", "sleep",
     "recent_interactions",
 }

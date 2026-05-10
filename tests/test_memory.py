@@ -6,7 +6,14 @@ import json
 
 import pytest
 
-from lifeman.memory import recall, record_memory
+from lifeman.memory import (
+    forget,
+    forget_matching,
+    get_memory,
+    recall,
+    record_memory,
+    update_memory,
+)
 
 
 async def _stored_memory_id(db, event_id: str) -> str:
@@ -102,3 +109,84 @@ async def test_recall_tag_filter_is_and_not_or(temp_db):
     both = await recall(tags=["alpha", "bravo"])
     contents = {m.content for m in both}
     assert contents == {"alpha bravo entry"}
+
+
+async def _first_stored_id(db) -> str:
+    rows = await db.execute_fetchall("SELECT id FROM memories ORDER BY created_at DESC LIMIT 1")
+    return rows[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_get_memory_returns_stored_row(temp_db):
+    await record_memory(content="payload to fetch", tags=["x"], reason="t")
+    mem_id = await _first_stored_id(temp_db)
+    got = await get_memory(mem_id)
+    assert got is not None
+    assert got.id == mem_id
+    assert got.content == "payload to fetch"
+
+
+@pytest.mark.asyncio
+async def test_get_memory_missing_returns_none(temp_db):
+    assert await get_memory("does-not-exist") is None
+
+
+@pytest.mark.asyncio
+async def test_update_memory_changes_fields(temp_db):
+    await record_memory(content="old content here", tags=["a"], reason="t")
+    mem_id = await _first_stored_id(temp_db)
+    assert await update_memory(mem_id, content="updated content here", tags=["a", "b"], reason="r")
+    got = await get_memory(mem_id)
+    assert got.content == "updated content here"
+    assert got.tags == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_update_memory_no_fields_returns_false(temp_db):
+    await record_memory(content="content seven words long here ok", reason="t")
+    mem_id = await _first_stored_id(temp_db)
+    assert await update_memory(mem_id) is False
+
+
+@pytest.mark.asyncio
+async def test_update_memory_missing_id(temp_db):
+    assert await update_memory("missing", content="x") is False
+
+
+@pytest.mark.asyncio
+async def test_forget_deletes_memory(temp_db):
+    await record_memory(content="ephemeral content here please", reason="t")
+    mem_id = await _first_stored_id(temp_db)
+    assert await forget(mem_id, reason="user requested removal")
+    assert await get_memory(mem_id) is None
+
+
+@pytest.mark.asyncio
+async def test_forget_missing_returns_false(temp_db):
+    assert await forget("missing", reason="r") is False
+
+
+@pytest.mark.asyncio
+async def test_forget_matching_dry_run_returns_candidates(temp_db):
+    await record_memory(content="banana smoothie recipe", reason="t")
+    await record_memory(content="banana bread recipe", reason="t")
+    await record_memory(content="completely unrelated", reason="t")
+    matches = await forget_matching("banana")
+    contents = {m.content for m in matches}
+    assert contents == {"banana smoothie recipe", "banana bread recipe"}
+    # Dry-run leaves rows intact.
+    remaining = await recall(query="banana")
+    assert len(remaining) == 2
+
+
+@pytest.mark.asyncio
+async def test_forget_matching_actually_deletes(temp_db):
+    await record_memory(content="banana smoothie recipe", reason="t")
+    await record_memory(content="apple pie recipe", reason="t")
+    deleted = await forget_matching("banana", dry_run=False, reason="cleanup")
+    assert len(deleted) == 1
+    remaining = await recall(query="banana")
+    assert remaining == []
+    # Non-matches survive.
+    others = await recall(query="apple")
+    assert len(others) == 1

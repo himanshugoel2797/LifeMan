@@ -57,6 +57,9 @@ A **Clear** button shows up when any filter is active.
 ## What is *not* here
 
 There is no edit / delete UI for individual memories on this page yet.
-The MCP surface includes `forget` and `forget_matching` (with
-`dry_run=true` default) but the kernel only exposes those to the LLM
-and the API for now. Stale memories accumulate; pruning is a tool job.
+The MCP surface (`get_memory`, `update_memory`, `forget`,
+`forget_matching` — with `dry_run=true` default for pattern deletion)
+and the HTTP API (`GET /api/memory/{id}`, `PATCH /api/memory/{id}`,
+`DELETE /api/memory/{id}`, `POST /api/memory/forget_matching`) cover the
+same surface. Stale memories accumulate; pruning is a tool job (or a
+deliberate API call) until a UI exists.

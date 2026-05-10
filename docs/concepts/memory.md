@@ -57,10 +57,21 @@ notes:
   embeddings until usage shows keyword retrieval failing. FTS5 was
   the planned upgrade; the current implementation is plain `LIKE`.
 
-The MCP surface includes `forget` (single id) and `forget_matching`
-(query, defaults to `dry_run=true`). Pattern-based deletion needs
-two explicit calls. The UI doesn't expose forget yet; today, prune
-via the API.
+## CRUD surface
+
+`record_memory` and `recall` are the routing-aware entry points;
+direct CRUD against the `memories` table is exposed via:
+
+- **MCP / chat tools** — `get_memory(id)`, `update_memory(id,
+  content?, tags?)`, `forget(id, reason)`, `forget_matching(query,
+  dry_run=true)`. Pattern-based deletion deliberately requires two
+  explicit calls (one to preview, one with `dry_run=false`).
+- **HTTP API** — `GET /api/memory/{id}`, `PATCH /api/memory/{id}`,
+  `DELETE /api/memory/{id}`, `POST /api/memory/forget_matching`
+  (mirrors the MCP shape).
+
+The UI doesn't expose edit/forget yet; today, prune via the API or
+the MCP surface.
 
 ## Why a domain at all
 

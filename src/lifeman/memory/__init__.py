@@ -158,8 +158,109 @@ async def recall(
     return out
 
 
+async def get_memory(memory_id: str) -> Memory | None:
+    """Fetch a single stored memory by id."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT * FROM memories WHERE id = ?", (memory_id,),
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    return Memory(
+        id=r["id"], content=r["content"], type=r["type"],
+        tags=json.loads(r["tags_json"]) if r["tags_json"] else [],
+        sensitivity=r["sensitivity"], source=r["source"],
+        created_at=r["created_at"], classified_by=r["classified_by"],
+    )
+
+
+async def update_memory(
+    memory_id: str,
+    *,
+    content: str | None = None,
+    tags: list[str] | None = None,
+    reason: str = "",
+    actor: str = "user",
+) -> bool:
+    """Edit content and/or tags of an existing memory. Returns True if updated."""
+    if content is None and tags is None:
+        return False
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT id FROM memories WHERE id = ?", (memory_id,),
+    )
+    if not rows:
+        return False
+    sets, vals = [], []
+    if content is not None:
+        sets.append("content = ?"); vals.append(content)
+    if tags is not None:
+        sets.append("tags_json = ?"); vals.append(json.dumps(tags))
+    vals.append(memory_id)
+    await db.execute(
+        f"UPDATE memories SET {', '.join(sets)} WHERE id = ?", vals,
+    )
+    await db.commit()
+    await audit.log(
+        source=actor, action="update_memory", target=memory_id, reason=reason,
+    )
+    return True
+
+
+async def forget(memory_id: str, *, reason: str = "", actor: str = "user") -> bool:
+    """Delete a single memory by id. Returns True if a row was removed."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT id FROM memories WHERE id = ?", (memory_id,),
+    )
+    if not rows:
+        return False
+    await db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+    await db.commit()
+    await audit.log(
+        source=actor, action="forget", target=memory_id, reason=reason,
+    )
+    return True
+
+
+async def forget_matching(
+    query: str,
+    *,
+    dry_run: bool = True,
+    reason: str = "",
+    actor: str = "user",
+    limit: int = 200,
+) -> list[Memory]:
+    """Find or delete memories whose content matches `query` (LIKE substring).
+
+    Defaults to dry-run: returns the candidate list without deleting.
+    Pass dry_run=False to actually remove the matches.
+    """
+    if not query:
+        return []
+    matches = await recall(query=query, limit=limit)
+    if dry_run or not matches:
+        return matches
+    db = await get_db()
+    ids = [m.id for m in matches]
+    placeholders = ",".join("?" * len(ids))
+    await db.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids)
+    await db.commit()
+    await audit.log(
+        source=actor, action="forget_matching",
+        target=f"{len(ids)} memories",
+        args_summary=query[:200], reason=reason,
+    )
+    return matches
+
+
 def install_handlers() -> None:
     install_builtin_handlers()
 
 
-__all__ = ["MEMORY_DOMAIN", "record_memory", "recall", "install_handlers"]
+__all__ = [
+    "MEMORY_DOMAIN", "record_memory", "recall",
+    "get_memory", "update_memory", "forget", "forget_matching",
+    "install_handlers",
+]

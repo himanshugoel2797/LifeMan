@@ -27,7 +27,7 @@ The core insight: build the smallest system that can build the rest of itself. R
 - **Permission system** — tools request capabilities at runtime; you grant allow-once / allow-always / deny via web UI
 - **Scheduler** — deferred and recurring invocations with editable context resolved at fire time
 - **Audit log** — every mutation logged with source, action, target, and reason
-- **MCP server** — 22 tools exposed to the local LLM (scheduling, tool discovery, permissions, memory, notifications)
+- **MCP server** — 35 tools exposed to the local LLM (scheduling, tool discovery, permissions, memory CRUD, notifications, observations, inputs)
 - **Web UI** — dashboard, tool browser, permission prompts, schedule viewer, audit log
 
 ## Stack
@@ -111,6 +111,12 @@ curl -X POST http://localhost:8390/api/schedules \
 | `POST` | `/api/notifications` | Create a notification |
 | `GET` | `/api/system/status` | System health |
 | `GET` | `/api/audit` | Query audit log |
+| `POST` | `/api/memory` | Record a memory |
+| `GET` | `/api/memory` | Recall / search memories |
+| `GET` | `/api/memory/{id}` | Fetch a stored memory |
+| `PATCH` | `/api/memory/{id}` | Update a memory's content/tags |
+| `DELETE` | `/api/memory/{id}` | Forget a single memory |
+| `POST` | `/api/memory/forget_matching` | Pattern-delete (`dry_run` default true) |
 
 ## MCP Server
 
