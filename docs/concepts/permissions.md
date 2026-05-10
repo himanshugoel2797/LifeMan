@@ -56,9 +56,21 @@ keys:
   expiry is copied into the grant's `expires_at` column when the
   request is resolved.
 - **`args_match: { … }`** — predicate scope. The grant only applies
-  to requests whose args contain *every* key in `args_match` with
-  equal values. Other args may differ. Use this to grant
-  "send_slack to #ops" without granting "send_slack to anywhere".
+  to requests whose args satisfy *every* key in `args_match`. Values
+  may be plain scalars (compared with `==`) or predicate dicts:
+    - `{"$any": true}` — any value.
+    - `{"$in": [v1, v2]}` — value must be one of the listed entries.
+    - `{"$prefix": "https://x/"}` — string-prefix match.
+    - `{"$glob": "*.example.com"}` — fnmatch-style glob.
+    - `{"$regex": "^foo.*"}` — `re.fullmatch` on string values.
+  Use this to grant `send_slack to #ops` without granting
+  `send_slack to anywhere`, or `fetch` for any URL under
+  `https://api.example.com/`.
+- **`network_mode: "unrestricted" | "local_only"`** — coarse network
+  scope for capabilities that gate egress. `unrestricted` covers any
+  host; `local_only` requires every URL/host arg (`host`, `hostname`,
+  `url`, `endpoint`) to resolve to a loopback or RFC1918 / link-local
+  address. Non-network args still go through `args_match`.
 
 ## The prompt flow
 

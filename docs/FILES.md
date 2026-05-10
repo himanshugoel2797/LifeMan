@@ -16,10 +16,11 @@ REVIEW.md.
 - [`config.py`](src/lifeman/config.py) — pydantic-settings `Settings`
   class with all `LIFEMAN_*` env vars. Single `settings` global.
 - [`db.py`](src/lifeman/db.py) — owns the singleton `aiosqlite`
-  connection. `SCHEMA` declares every table; `get_db()` opens, runs
-  the schema, and applies tiny column-add migrations
-  (sessions, invocations, permission_requests). `close_db()` for
-  shutdown.
+  connection. `SCHEMA` declares the baseline tables; `_MIGRATIONS` is
+  a numbered, ordered list applied via `_apply_migration` and tracked
+  in `schema_migrations`. `get_db()` opens, applies, returns. Adding a
+  schema change means appending one `(id, sql)` tuple — never
+  renumber, never edit a past id. `close_db()` for shutdown.
 - [`auth.py`](src/lifeman/auth.py) — `HTTPBearer` dependency
   `require_auth` that gates `/api/*`. UI routes are unauthenticated;
   `main.py` blocks non-loopback binds to keep that safe.
@@ -36,9 +37,11 @@ REVIEW.md.
   polls `schedules` every 5 s and fires due rows in parallel
   (`asyncio.gather`). Tracks `_in_flight` and reserves `fires_at`
   forward before the tool runs to avoid double-fire under long tool
-  durations. `compute_initial_fires_at` parses every accepted `when`
-  form; `_compute_next_fire` advances recurring schedules by
-  "next occurrence of HH:MM after now".
+  durations. Each fire generates a `fire_id` (uuid) plumbed to the
+  sandbox as `LIFEMAN_FIRE_ID` for tool-side dedup of external side
+  effects. `compute_initial_fires_at` parses every accepted `when`
+  form and is the single source of "next-occurrence" logic;
+  `_compute_next_fire` is a thin wrapper that delegates to it.
 - [`sandbox.py`](src/lifeman/sandbox.py) — bubblewrap launcher.
   `run_tool` either runs the tool's `run.py` directly (sandbox
   disabled / no bwrap) or builds an isolated bubblewrap environment
@@ -54,7 +57,9 @@ REVIEW.md.
 - [`permissions_runtime.py`](src/lifeman/permissions_runtime.py) —
   in-memory glue (`asyncio.Event` per request id) that lets a caller
   block on a future user resolution. Also hosts `scope_matches`
-  (`args_match` predicate), `grant_expires_at` (parses `expires_at` /
+  (`args_match` with predicate dicts: `$any`, `$in`, `$prefix`,
+  `$glob`, `$regex`; plus `network_mode` for unrestricted vs
+  loopback / RFC1918 egress), `grant_expires_at` (parses `expires_at` /
   `until` from a scope dict), and `find_matching_grant` (returns the
   first non-expired covering grant).
 - [`llm.py`](src/lifeman/llm.py) — async client for Ollama's
@@ -76,9 +81,10 @@ REVIEW.md.
   `read_workspace_tool` surface finished artefacts for one-click
   registration.
 - [`mcp_server.py`](src/lifeman/mcp_server.py) — separate `lifeman-mcp`
-  process that exposes the same tool surface to external MCP clients
-  over stdio, by HTTP-proxying to the main core. Drift target — see
-  REVIEW.md.
+  process for external MCP clients over stdio. ~50 LOC: enumerates
+  `chat_tools.SPECS` and registers each entry as an MCP tool whose
+  body calls `dispatch(name, raw_args)` in-process. Single source of
+  truth, no drift.
 
 ## `routes/` — HTTP route modules
 

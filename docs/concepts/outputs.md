@@ -78,11 +78,40 @@ To replace the router, install a tool with `role: output_router`.
 The engine prefers the latest-installed router tool; falls back to
 the built-in.
 
+## Delivery state machine
+
+Each `output_deliveries` row has a `status` column that flows through:
+
+```
+in_flight ──► delivered ──► (cancelled by cancel_output)
+   │              │
+   │              └──► (terminal)
+   ▼
+cancel_pending ──► cancelled
+   │
+   ▼
+failed                 (channel raised; terminal)
+```
+
+`emit_output` inserts the row as `in_flight` *before* calling
+`channel.deliver`, then atomically transitions to `delivered` or
+`failed` only if the row is still `in_flight`. If the UPDATE matches
+zero rows the only legal explanation is that `cancel_output` flipped
+the row to `cancel_pending` mid-deliver — in that case the emit
+coroutine runs a post-deliver `channel.cancel` itself and writes
+`status='cancelled'`.
+
+This is what closes the cancel-vs-emit race: the row exists before
+the channel call returns, so a concurrent `cancel_output` can claim
+it instead of missing it.
+
 ## Cancel and respond
 
-- **`cancel_output(id, reason)`** — walks `output_deliveries` and
-  calls each channel's `cancel`. Toasts disappear from active
-  surfaces; persistent entries get marked cancelled.
+- **`cancel_output(id, reason)`** — flips every `in_flight` row for
+  the event to `cancel_pending` (the emit coroutine handles those),
+  then atomically flips `delivered` rows to `cancelled` and calls
+  each channel's `cancel`. Toasts disappear from active surfaces;
+  persistent entries get marked cancelled.
 - **`report_response(id, label)`** — channel-side callback when the
   user clicks an action. Looks up the original event's `actions`,
   finds the matching label, invokes the configured tool through the

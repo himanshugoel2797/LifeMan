@@ -20,8 +20,13 @@ Everything below is in [sandbox.py](src/lifeman/sandbox.py).
 3. **Network namespace** — by default unshared (no network at all). If
    the manifest's `network` list is non-empty, the sandbox keeps the
    host network and exposes the allowlist to the tool via
-   `LIFEMAN_NETWORK_HOSTS`. The tool is expected to self-restrict;
-   syscall-level egress proxying is future work.
+   `LIFEMAN_NETWORK_HOSTS`. Two special tokens set
+   `LIFEMAN_NETWORK_MODE` instead:
+   - `@unrestricted` — any internet host (`mode=unrestricted`).
+   - `@local` — loopback / RFC1918 only (`mode=local_only`, advisory
+     until an egress proxy is wired in).
+   The tool is expected to self-restrict; syscall-level egress proxying
+   is future work.
 4. **PID, IPC, UTS namespaces** — unshared. The tool can't see other
    processes, post sysv IPC messages, or change hostname.
 5. **`/dev`** — minimal. `/dev/null`, `/dev/urandom` only.

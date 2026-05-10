@@ -42,9 +42,13 @@ Defined in [models.py:ToolManifest](src/lifeman/models.py). Fields:
   means *no network namespace*: the sandbox unshares the network and
   the tool literally cannot talk to anyone. Non-empty means the
   sandbox keeps the host network and exposes the allowlist via
-  `LIFEMAN_NETWORK_HOSTS` so the tool can self-restrict (a syscall-
-  level egress proxy is future work — see
-  [sandbox.md](sandbox.md)).
+  `LIFEMAN_NETWORK_HOSTS` so the tool can self-restrict. Two special
+  tokens set the network *mode* instead, surfaced via
+  `LIFEMAN_NETWORK_MODE`:
+  - `@unrestricted` — any internet host.
+  - `@local` — loopback / RFC1918 only (advisory; enforcement at the
+    syscall level is future work).
+  See [sandbox.md](sandbox.md).
 - **`compute_limits`** — dict; `timeout` (in seconds) is the only
   field the runtime currently consumes.
 - **`triggers`** — names of other tools this tool wants to invoke.

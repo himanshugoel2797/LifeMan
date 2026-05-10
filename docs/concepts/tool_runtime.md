@@ -36,6 +36,10 @@ imports it as `import lifeman_tool` and calls the methods below.
 | `state_delete(key, reason)` | Remove a key. |
 | `state_list(prefix=None)` | List `{key, updated_at}` entries; `prefix` is a literal match. |
 | `llm_chat(messages, model, temperature, tools, reason)` | One chat completion against the local LLM. Gated by `llm:invoke` (default-deny, prompts on first use). Returns `{content, tool_calls, finish_reason}`. |
+| `network_hosts()` | The host allowlist this tool declared in `manifest.network`. Empty list = no network. |
+| `network_mode()` | `"unrestricted"` or `"local_only"` if the manifest used those tokens, else `None`. |
+| `network_allowed(host)` | Boolean: is `host` covered by the declared allowlist? Matches exact host or `"*"`. |
+| `fire_id()` | When the invocation came from a scheduled fire, returns the scheduler's stable per-fire id. Use it as a dedup key in `state_set` so a crash-mid-fire replay doesn't double-deliver external side effects. `None` for non-scheduler-fired invocations. |
 
 The methods on the socket are implemented in
 [tool_socket.py](src/lifeman/tool_socket.py). Each invocation gets its

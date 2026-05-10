@@ -63,6 +63,22 @@ naive selection would re-fire it on every tick. The fix:
 Result: even if a tool runs for an hour, the next tick won't pick the
 same row.
 
+## Crash-mid-fire and idempotence
+
+Two layers handle the "process died after we promised to fire" case:
+
+1. **Reconciliation on startup** — `_reconcile_crashed_fires` finds
+   any row with `last_started_at IS NOT NULL` (set just before the
+   tool ran, cleared on success) and resets `fires_at` to *now* so
+   the next tick re-fires it.
+2. **Per-fire idempotence key** — every fire generates a `fire_id`
+   (12-char uuid) plumbed into the sandbox as `LIFEMAN_FIRE_ID`. A
+   tool that performs external side effects (HTTP POST, email, etc.)
+   reads `lifeman_tool.fire_id()` and stores it in its
+   per-tool state KV. On replay it sees the same id and skips
+   re-delivery. This is the only protection against double-firing a
+   side-effecting tool — schedule semantics alone can't prevent it.
+
 ## Context refs
 
 `context_refs` is a list of opaque keys. The scheduler doesn't

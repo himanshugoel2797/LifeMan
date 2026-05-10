@@ -18,9 +18,10 @@ Two child processes are managed by the kernel:
   scripts. Each tool run is a one-shot subprocess.
 
 A separate `lifeman-mcp` process exists for connecting external MCP
-clients (e.g. Claude Desktop) over stdio; it proxies via HTTP to the
-main core ([mcp_server.py](src/lifeman/mcp_server.py)). For the
-in-process Qwen tool surface, see `chat_tools.py` instead.
+clients (e.g. Claude Desktop) over stdio. It enumerates the canonical
+`chat_tools.SPECS` registry and dispatches in-process — one source of
+truth for both the Qwen live-chat surface and external MCP clients.
+See [mcp_server.py](src/lifeman/mcp_server.py) and `chat_tools.py`.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -68,9 +69,10 @@ this guard — see REVIEW.md.
 
 One SQLite file (`~/.lifeman/data.db` by default), WAL mode, foreign
 keys on. Schema is created idempotently on startup
-([db.py](src/lifeman/db.py)) and a tiny migration helper adds new
-columns to a few historical tables (sessions, invocations,
-permission_requests).
+([db.py](src/lifeman/db.py)) followed by a numbered, tracked migration
+list. Each migration has a stable integer id and is recorded in
+`schema_migrations` once applied, so fresh installs and upgrades end
+up at the same final shape and a migration only ever runs once.
 
 Tables, grouped:
 
@@ -370,9 +372,13 @@ return None
 ```
 
 `scope_matches` checks `args_match` — every key in the grant's
-`args_match` must be present in the request's args. Other scope keys
-(`requester`, `expires_at`, `until`) are matched at SQL or column
-level.
+`args_match` must satisfy the request's args. Values may be plain
+scalars (`==`) or predicate dicts (`$any`, `$in`, `$prefix`, `$glob`,
+`$regex`). Scope may also carry `network_mode = "unrestricted" |
+"local_only"` for capabilities that gate egress; `local_only`
+requires every URL/host arg to resolve to a loopback or RFC1918
+address. Other scope keys (`requester`, `expires_at`, `until`) are
+matched at SQL or column level.
 
 `POST /api/permissions/request` always inserts a row, even when a
 covering grant already exists, so the returned `id` is always a real

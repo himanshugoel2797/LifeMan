@@ -75,20 +75,19 @@ engine = Engine(
 )
 
 async def ingest_input(event: InputEvent) -> None:
-    decision = await engine.decide(event, state={})
-    await engine.persist_audit(decision)
-    for handler_name in decision.dispatched:
-        h = await _resolve_handler(handler_name)
-        if h is None:
-            continue
-        result = await h.invoke(INPUT_DOMAIN.primary_method, event=event.to_payload())
-        await engine.record_dispatch(
-            event_id=event.event_id,
-            handler=handler_name,
-            ok="error" not in result,
-            failure_reason=result.get("error"),
-        )
+    # The whole decide -> persist audit -> dispatch lifecycle in one call.
+    # Pass `transform_for_dispatch=fn` if you need to mutate the event after
+    # routing but before dispatch (memory uses this to tag `needs_review`).
+    decision, ok, dropped = await engine.run_event(event)
+    if decision.expired:
+        return
 ```
+
+For domains that need finer control, the underlying steps are still
+public on `Engine`: `decide`, `persist_audit`, `dispatch_all`,
+`record_dispatch`. The outputs domain uses them directly because it
+runs its own per-channel state machine instead of a plain dispatch
+loop.
 
 That's it. The build chat can now ship a new `input_router` tool or new
 `input_handler` tools and they'll be picked up automatically.
