@@ -146,6 +146,42 @@ async def test_recurring_schedule_advances_to_next_occurrence(temp_db, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_reconcile_crashed_fires_resets_orphaned_rows(temp_db):
+    """A row whose previous fire never completed (last_started_at set,
+    fires_at advanced) gets clawed back to NOW so the next tick re-fires
+    it. The marker is cleared too so a subsequent crash mid-fire is
+    recoverable for the same row."""
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    started = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    sid = await _insert_schedule(temp_db, tool="t", fires_at=future)
+    await temp_db.execute(
+        "UPDATE schedules SET last_started_at = ? WHERE id = ?",
+        (started, sid),
+    )
+    # A second row that completed cleanly (last_started_at IS NULL) must be
+    # left alone — its future fires_at is the real next fire.
+    sid_clean = await _insert_schedule(temp_db, tool="u", fires_at=future)
+    await temp_db.commit()
+
+    await scheduler._reconcile_crashed_fires()
+
+    crashed = dict((await temp_db.execute_fetchall(
+        "SELECT fires_at, last_started_at FROM schedules WHERE id = ?", (sid,)
+    ))[0])
+    clean = dict((await temp_db.execute_fetchall(
+        "SELECT fires_at, last_started_at FROM schedules WHERE id = ?", (sid_clean,)
+    ))[0])
+
+    # Crashed row: fires_at moved back to ~now; last_started_at cleared.
+    assert crashed["last_started_at"] is None
+    crashed_fires = datetime.fromisoformat(crashed["fires_at"])
+    assert crashed_fires <= datetime.now(timezone.utc) + timedelta(seconds=5)
+    # Clean row: untouched.
+    assert clean["last_started_at"] is None
+    assert clean["fires_at"] == future
+
+
+@pytest.mark.asyncio
 async def test_compute_next_fire_today_or_tomorrow_branch():
     """The fix from REVIEW: a daily 23:00 fired at 01:00 picks today's 23:00,
     not tomorrow's. We can't time-travel, so simulate by checking that the

@@ -29,8 +29,38 @@ _task: asyncio.Task | None = None
 async def start() -> None:
     global _task
     if _task is None:
+        await _reconcile_crashed_fires()
         _task = asyncio.create_task(_loop())
         log.info("Scheduler started")
+
+
+async def _reconcile_crashed_fires() -> None:
+    """Reset fires_at for any schedule whose prior fire never completed.
+
+    The fire path advances `fires_at` to the next-fire time *before* the
+    tool runs, then sets `last_started_at`. On clean completion the tool
+    code clears `last_started_at`. If the process crashes between the
+    advance and completion, the row is left with `last_started_at` set
+    and `fires_at` in the future — the fire was promised but never
+    actually delivered. On startup, claw those rows back to `now` so the
+    next tick re-fires them. Also clears `last_started_at` on those rows
+    so a later crash-mid-fire of the same schedule is recoverable too.
+    """
+    db = await get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    res = await db.execute(
+        """UPDATE schedules
+           SET fires_at = ?, last_started_at = NULL
+           WHERE last_started_at IS NOT NULL AND cancelled_at IS NULL""",
+        (now,),
+    )
+    await db.commit()
+    if res.rowcount:
+        log.warning(
+            "scheduler: reconciled %d schedule(s) whose previous fire never "
+            "completed (likely crash mid-fire); they will re-fire on the next tick",
+            res.rowcount,
+        )
 
 
 async def stop() -> None:
@@ -102,9 +132,10 @@ async def _fire(schedule: dict) -> None:
     reserved_until = next_fire or (
         datetime.now(timezone.utc) + timedelta(hours=1)
     ).isoformat()
+    started_at = datetime.now(timezone.utc).isoformat()
     await db.execute(
-        "UPDATE schedules SET fires_at = ? WHERE id = ?",
-        (reserved_until, schedule_id),
+        "UPDATE schedules SET fires_at = ?, last_started_at = ? WHERE id = ?",
+        (reserved_until, started_at, schedule_id),
     )
     await db.commit()
 
@@ -131,7 +162,8 @@ async def _fire(schedule: dict) -> None:
         # Recurring: lock in the previously-reserved next_fire as authoritative.
         await db.execute(
             """UPDATE schedules
-               SET last_fired = ?, fires_at = ?, total_fires = ?, consecutive_no_ops = ?
+               SET last_fired = ?, fires_at = ?, total_fires = ?,
+                   consecutive_no_ops = ?, last_started_at = NULL
                WHERE id = ?""",
             (datetime.now(timezone.utc).isoformat(), next_fire, total, no_ops, schedule_id),
         )
@@ -139,7 +171,8 @@ async def _fire(schedule: dict) -> None:
         # One-shot: mark as done by setting cancelled_at
         await db.execute(
             """UPDATE schedules
-               SET last_fired = ?, total_fires = ?, cancelled_at = ?
+               SET last_fired = ?, total_fires = ?, cancelled_at = ?,
+                   last_started_at = NULL
                WHERE id = ?""",
             (datetime.now(timezone.utc).isoformat(), total, datetime.now(timezone.utc).isoformat(), schedule_id),
         )

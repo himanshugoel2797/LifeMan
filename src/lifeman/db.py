@@ -400,6 +400,13 @@ _PERMISSION_REQUEST_COLUMN_ADDS = [
     ("invocation_id", "TEXT"),
 ]
 
+_SCHEDULES_COLUMN_ADDS = [
+    # Crash-recovery marker. Set just before the tool runs; cleared on success.
+    # If a row has last_started_at IS NOT NULL on startup, the prior process
+    # crashed mid-fire and the scheduler resets fires_at to NOW so it re-fires.
+    ("last_started_at", "TEXT"),
+]
+
 
 async def get_db() -> aiosqlite.Connection:
     global _db
@@ -421,6 +428,7 @@ async def get_db() -> aiosqlite.Connection:
         await _migrate("sessions", _SESSION_COLUMN_ADDS)
         await _migrate("invocations", _INVOCATION_COLUMN_ADDS)
         await _migrate("permission_requests", _PERMISSION_REQUEST_COLUMN_ADDS)
+        await _migrate("schedules", _SCHEDULES_COLUMN_ADDS)
 
         # Guards the chat-appender seq race. Created here (not in SCHEMA) so
         # an upgrade with pre-existing duplicates from earlier seq-race fires
