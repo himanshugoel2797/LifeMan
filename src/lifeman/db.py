@@ -94,17 +94,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
     reason TEXT NOT NULL DEFAULT ''
 );
 
-CREATE TABLE IF NOT EXISTS notifications (
-    id TEXT PRIMARY KEY,
-    message TEXT NOT NULL,
-    urgency TEXT NOT NULL DEFAULT 'ambient',
-    channel TEXT NOT NULL DEFAULT 'web',
-    context_json TEXT,
-    created_at TEXT NOT NULL,
-    expires_at TEXT,
-    dismissed_at TEXT
-);
-
 -- Output system: structured events, routing decisions, channel registry,
 -- per-channel deliveries. See OUTPUT_DESIGN.MD.
 CREATE TABLE IF NOT EXISTS output_events (

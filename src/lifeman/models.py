@@ -184,35 +184,6 @@ class AuditQuery(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Notification models
-# ---------------------------------------------------------------------------
-
-class NotificationCreate(BaseModel):
-    """Legacy notify-style request. Routes through the output system as a
-    `status` event (or `category` if supplied). The `channel` field has
-    been removed per OUTPUT_DESIGN.MD §"MCP surface changes" — channel
-    selection is the router's job, not the caller's."""
-
-    message: str
-    urgency: str = "ambient"  # ambient | soft | persistent | urgent
-    category: str = "status"
-    context: dict | None = None
-    expires_at: str | None = None
-    reason: str = ""
-
-
-class Notification(BaseModel):
-    id: str
-    message: str
-    urgency: str
-    channel: str
-    context: dict | None = None
-    created_at: str
-    expires_at: str | None = None
-    dismissed_at: str | None = None
-
-
-# ---------------------------------------------------------------------------
 # Build request models
 # ---------------------------------------------------------------------------
 

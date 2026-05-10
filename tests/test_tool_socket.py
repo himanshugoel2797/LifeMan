@@ -103,8 +103,8 @@ async def test_notify_routes_through_output_system(temp_db):
     assert "result" in resp
     res = resp["result"]
     assert "output_id" in res
-    # `alert` category in DEFAULT_RULES routes to web_toast + web_persistent.
-    # web_persistent writes a row in notifications; check the event was stored.
+    # `alert` category in DEFAULT_RULES routes to web_toast + web_persistent;
+    # check the canonical event row was stored.
     rows = await temp_db.execute_fetchall(
         "SELECT category, urgency FROM output_events WHERE id = ?", (res["output_id"],),
     )

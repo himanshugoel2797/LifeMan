@@ -374,9 +374,9 @@ def notify(
     you need structured content or response actions.
     """
     with _client() as c:
-        r = c.post("/api/notifications", json={
-            "message": message, "category": category, "urgency": urgency,
-            "context": context, "expires_at": expires_at, "reason": reason,
+        r = c.post("/api/outputs", json={
+            "content": message, "category": category, "urgency": urgency,
+            "context": context or {}, "expires_at": expires_at, "reason": reason,
         })
         r.raise_for_status()
         return r.json()
