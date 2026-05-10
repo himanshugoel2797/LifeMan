@@ -111,22 +111,100 @@ async def _handle_list_scheduled(args: dict) -> dict:
 
 
 async def _handle_notify(args: dict) -> dict:
-    db = await get_db()
-    nid = str(uuid.uuid4())[:12]
-    now = datetime.now(timezone.utc).isoformat()
-    await db.execute(
-        """INSERT INTO notifications (id, message, urgency, channel, created_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (
-            nid,
-            args.get("message", ""),
-            args.get("urgency", "ambient"),
-            args.get("channel", "web"),
-            now,
-        ),
+    """Sugar over emit_output for simple text notifications."""
+    from lifeman.outputs import emit_output
+
+    res = await emit_output(
+        content=args.get("message", ""),
+        category=args.get("category", "status"),
+        urgency=args.get("urgency", "ambient"),
+        expires_at=args.get("expires_at"),
+        context=args.get("context") or {},
+        reason=args.get("reason", ""),
+        source_tool="llm",
     )
-    await db.commit()
-    return {"id": nid}
+    return {"output_id": res.output_id, "dispatched": res.dispatched}
+
+
+async def _handle_emit_output(args: dict) -> dict:
+    from lifeman.outputs import emit_output
+
+    res = await emit_output(
+        content=args.get("content", ""),
+        category=args.get("category", "status"),
+        urgency=args.get("urgency", "ambient"),
+        expires_at=args.get("expires_at"),
+        sensitivity=args.get("sensitivity", "personal"),
+        context=args.get("context") or {},
+        actions=args.get("actions") or [],
+        reason=args.get("reason", ""),
+        source_tool="llm",
+    )
+    return res.model_dump()
+
+
+async def _handle_record_memory(args: dict) -> dict:
+    from lifeman.memory import record_memory
+
+    res = await record_memory(
+        content=args.get("content", ""),
+        type_hint=args.get("type_hint"),
+        tags=args.get("tags") or [],
+        source="llm",
+        sensitivity=args.get("sensitivity", "personal"),
+        reason=args.get("reason", ""),
+    )
+    return res.model_dump()
+
+
+async def _handle_recall(args: dict) -> dict:
+    from lifeman.memory import recall
+
+    mems = await recall(
+        query=args.get("query"),
+        type=args.get("type"),
+        tags=args.get("tags"),
+        before=args.get("before"),
+        after=args.get("after"),
+        limit=int(args.get("limit", 10)),
+    )
+    return {"memories": [m.model_dump() for m in mems]}
+
+
+async def _handle_observe(args: dict) -> dict:
+    from lifeman.observations import observe
+
+    res = await observe(
+        message=args.get("message", ""),
+        level=args.get("level", "info"),
+        component=args.get("component", ""),
+        source="llm",
+        reason=args.get("reason", ""),
+    )
+    return res.model_dump()
+
+
+async def _handle_ingest_input(args: dict) -> dict:
+    from lifeman.inputs import ingest_input
+
+    res = await ingest_input(
+        surface=args.get("surface", "api"),
+        raw_payload=args.get("raw_payload", ""),
+        intent_hint=args.get("intent_hint"),
+        source="llm",
+        reason=args.get("reason", ""),
+    )
+    return res.model_dump()
+
+
+async def _handle_cancel_output(args: dict) -> dict:
+    from lifeman.outputs import cancel_output
+
+    output_id = args.get("output_id")
+    if not output_id:
+        return {"error": "missing 'output_id'"}
+    res = await cancel_output(output_id, reason=args.get("reason", ""), source_tool="llm")
+    return res.model_dump()
 
 
 async def _handle_request_build(args: dict) -> dict:
@@ -471,18 +549,165 @@ SPECS: dict[str, tuple[dict, Callable[[dict], Awaitable[dict]]]] = {
     "notify": (
         _fn(
             "notify",
-            "Send the user a notification (ambient | soft | persistent).",
+            "Sugar over emit_output for plain-text user notifications. The "
+            "router decides which channel(s) surface it — never specify a "
+            "channel. Use emit_output directly when you need structured "
+            "content or response actions.",
             {
                 "type": "object",
                 "properties": {
                     "message": {"type": "string"},
-                    "urgency": {"type": "string", "enum": ["ambient", "soft", "persistent"]},
-                    "channel": {"type": "string"},
+                    "category": {
+                        "type": "string",
+                        "description": "What kind of event this is. Defaults to 'status'.",
+                    },
+                    "urgency": {
+                        "type": "string",
+                        "enum": ["ambient", "soft", "persistent", "urgent"],
+                    },
+                    "expires_at": {"type": "string"},
+                    "reason": {"type": "string"},
                 },
                 "required": ["message"],
             },
         ),
         _handle_notify,
+    ),
+    "emit_output": (
+        _fn(
+            "emit_output",
+            "Emit a structured output event. The router picks channels based "
+            "on category, urgency, user state, and installed channels — you "
+            "do NOT pick channels. `content` may be a string or an object "
+            "{title, body, fields, image_url, markdown}. `actions` are "
+            "buttons/quick-replies; channels that can't capture them ignore "
+            "the field. Always set `category` and `urgency` deliberately, "
+            "and provide `reason` (it shows in audit).",
+            {
+                "type": "object",
+                "properties": {
+                    "content": {},
+                    "category": {"type": "string"},
+                    "urgency": {"type": "string", "enum": ["ambient", "soft", "persistent", "urgent"]},
+                    "expires_at": {"type": "string"},
+                    "sensitivity": {"type": "string", "enum": ["public", "personal", "private"]},
+                    "context": {"type": "object"},
+                    "actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "invoke_tool": {"type": "string"},
+                                "invoke_args": {"type": "object"},
+                                "confirmation_required": {"type": "boolean"},
+                            },
+                            "required": ["label", "invoke_tool"],
+                        },
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["content", "category", "urgency", "reason"],
+            },
+        ),
+        _handle_emit_output,
+    ),
+    "record_memory": (
+        _fn(
+            "record_memory",
+            "Emit a memory candidate. The memory router decides whether and "
+            "how to store it (episodic, semantic, identity, summary, or "
+            "discard). You don't pick the store directly — the router does. "
+            "Use sparingly: most observations are not memory-worthy.",
+            {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                    "type_hint": {
+                        "type": "string",
+                        "enum": ["episodic", "semantic", "identity", "summary"],
+                    },
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "sensitivity": {"type": "string", "enum": ["public", "personal", "private"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["content", "reason"],
+            },
+        ),
+        _handle_record_memory,
+    ),
+    "recall": (
+        _fn(
+            "recall",
+            "Search the memory store by query, type, tags, or time range.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "type": {"type": "array", "items": {"type": "string"}},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "before": {"type": "string"},
+                    "after": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        ),
+        _handle_recall,
+    ),
+    "observe": (
+        _fn(
+            "observe",
+            "Emit a structured observation (log line). The observation "
+            "router decides whether to archive, summarize for daily "
+            "roll-up, or discard. Levels: debug | info | warn | error.",
+            {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                    "level": {"type": "string", "enum": ["debug", "info", "warn", "error"]},
+                    "component": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["message"],
+            },
+        ),
+        _handle_observe,
+    ),
+    "ingest_input": (
+        _fn(
+            "ingest_input",
+            "Inject a unit of input as if it came from a user surface. "
+            "The input router will dispatch it (typically back to the LLM "
+            "in a new chat session, or to direct_invoke for tool calls).",
+            {
+                "type": "object",
+                "properties": {
+                    "surface": {"type": "string"},
+                    "raw_payload": {"type": "string"},
+                    "intent_hint": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["surface", "raw_payload"],
+            },
+        ),
+        _handle_ingest_input,
+    ),
+    "cancel_output": (
+        _fn(
+            "cancel_output",
+            "Recall a previously-emitted output event from every channel "
+            "that delivered it. Use when an event becomes irrelevant before "
+            "the user sees it (e.g. condition resolved on its own).",
+            {
+                "type": "object",
+                "properties": {
+                    "output_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["output_id", "reason"],
+            },
+        ),
+        _handle_cancel_output,
     ),
     "request_build": (
         _fn(

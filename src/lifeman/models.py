@@ -16,6 +16,14 @@ class ToolManifest(BaseModel):
     compute_limits: dict = Field(default_factory=dict, description="CPU/mem/time limits")
     triggers: list[str] = Field(default_factory=list, description="Tools/actions this tool can trigger")
     user_visible: bool = True
+    # Output system roles per OUTPUT_DESIGN.MD §"Architecture":
+    #   "general" (default), "router" (the active output router),
+    #   "output_channel" (delivery target). Multiple tools may share a
+    #   role; the latest one installed wins (router) or all participate
+    #   (channels).
+    role: str = "general"
+    # When role == "output_channel", channel-specific manifest fields.
+    output_channel: dict | None = None
 
 
 class ToolCreate(BaseModel):
@@ -180,11 +188,17 @@ class AuditQuery(BaseModel):
 # ---------------------------------------------------------------------------
 
 class NotificationCreate(BaseModel):
+    """Legacy notify-style request. Routes through the output system as a
+    `status` event (or `category` if supplied). The `channel` field has
+    been removed per OUTPUT_DESIGN.MD §"MCP surface changes" — channel
+    selection is the router's job, not the caller's."""
+
     message: str
-    urgency: str = "ambient"  # ambient | soft | persistent
-    channel: str = "web"
+    urgency: str = "ambient"  # ambient | soft | persistent | urgent
+    category: str = "status"
     context: dict | None = None
     expires_at: str | None = None
+    reason: str = ""
 
 
 class Notification(BaseModel):

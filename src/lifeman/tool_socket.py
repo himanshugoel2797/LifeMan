@@ -147,29 +147,63 @@ class ToolSocket:
             return {"result": result}
 
         if method == "notify":
-            db = await get_db()
-            nid = str(uuid.uuid4())[:12]
-            now = datetime.now(timezone.utc).isoformat()
-            await db.execute(
-                """INSERT INTO notifications (id, message, urgency, channel, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (
-                    nid,
-                    str(params.get("message", ""))[:1000],
-                    params.get("urgency", "ambient"),
-                    params.get("channel", "web"),
-                    now,
-                ),
+            from lifeman.outputs import emit_output
+
+            res = await emit_output(
+                content=str(params.get("message", ""))[:1000],
+                category=params.get("category", "status"),
+                urgency=params.get("urgency", "ambient"),
+                expires_at=params.get("expires_at"),
+                context=params.get("context") or {},
+                reason=params.get("reason", ""),
+                source_tool=f"tool:{self.tool_name}",
             )
-            await db.commit()
-            await audit.log(
-                source=f"tool:{self.tool_name}",
-                action="notify",
-                target=nid,
-                args_summary=str(params.get("message", ""))[:200],
+            return {"result": res.model_dump()}
+
+        if method == "emit_output":
+            from lifeman.outputs import emit_output
+
+            res = await emit_output(
+                content=params.get("content", ""),
+                category=params.get("category", "status"),
+                urgency=params.get("urgency", "ambient"),
+                expires_at=params.get("expires_at"),
+                sensitivity=params.get("sensitivity", "personal"),
+                context=params.get("context") or {},
+                actions=params.get("actions") or [],
+                reason=params.get("reason", ""),
+                source_tool=f"tool:{self.tool_name}",
             )
-            await bus.publish("notification", {"id": nid, "from": self.tool_name})
-            return {"result": {"id": nid}}
+            return {"result": res.model_dump()}
+
+        if method == "cancel_output":
+            from lifeman.outputs import cancel_output
+
+            output_id = params.get("output_id")
+            if not output_id:
+                return {"error": "missing 'output_id'"}
+            res = await cancel_output(
+                output_id,
+                reason=params.get("reason", ""),
+                source_tool=f"tool:{self.tool_name}",
+            )
+            return {"result": res.model_dump()}
+
+        if method == "report_response":
+            from lifeman.outputs import report_response
+
+            output_id = params.get("output_id")
+            label = params.get("action_label")
+            if not output_id or not label:
+                return {"error": "missing 'output_id' or 'action_label'"}
+            res = await report_response(
+                output_id=output_id,
+                action_label=label,
+                raw_input=params.get("raw_input"),
+                channel=params.get("channel", ""),
+                source_tool=f"tool:{self.tool_name}",
+            )
+            return {"result": res}
 
         if method == "request_permission":
             db = await get_db()
@@ -203,6 +237,81 @@ class ToolSocket:
             timeout = float(params.get("timeout", 120.0))
             status = await await_permission(pid, timeout=timeout)
             return {"result": {"id": pid, "status": status}}
+
+        if method == "sse_publish":
+            # Output channel tools publish UI events through here. Restricted
+            # to a single namespace so a misbehaving tool can't impersonate
+            # other system events.
+            event_type = str(params.get("event_type", ""))
+            if not event_type.startswith("output."):
+                return {"error": "sse_publish event_type must start with 'output.'"}
+            data = params.get("data") or {}
+            if not isinstance(data, dict):
+                return {"error": "sse_publish data must be an object"}
+            await bus.publish(event_type, {
+                "source_tool": self.tool_name,
+                **data,
+            })
+            return {"result": True}
+
+        if method == "list_output_channels":
+            # Used by the router tool to discover what's installed.
+            from lifeman.outputs.tool_backed import all_available_channels
+            channels = await all_available_channels()
+            return {"result": [c.model_dump() for c in channels]}
+
+        if method == "record_memory":
+            from lifeman.memory import record_memory
+            res = await record_memory(
+                content=str(params.get("content", ""))[:8000],
+                type_hint=params.get("type_hint"),
+                tags=params.get("tags") or [],
+                source=f"tool:{self.tool_name}",
+                sensitivity=params.get("sensitivity", "personal"),
+                expires_at=params.get("expires_at"),
+                context=params.get("context") or {},
+                reason=params.get("reason", ""),
+            )
+            return {"result": res.model_dump()}
+
+        if method == "recall":
+            from lifeman.memory import recall
+            mems = await recall(
+                query=params.get("query"),
+                type=params.get("type"),
+                tags=params.get("tags"),
+                before=params.get("before"),
+                after=params.get("after"),
+                limit=int(params.get("limit", 10)),
+            )
+            return {"result": [m.model_dump() for m in mems]}
+
+        if method == "observe":
+            from lifeman.observations import observe
+            res = await observe(
+                message=str(params.get("message", ""))[:2000],
+                level=params.get("level", "info"),
+                component=params.get("component", ""),
+                source=f"tool:{self.tool_name}",
+                expires_at=params.get("expires_at"),
+                context=params.get("context") or {},
+                reason=params.get("reason", ""),
+            )
+            return {"result": res.model_dump()}
+
+        if method == "ingest_input":
+            from lifeman.inputs import ingest_input
+            res = await ingest_input(
+                surface=params.get("surface", "api"),
+                raw_payload=str(params.get("raw_payload", "")),
+                intent_hint=params.get("intent_hint"),
+                source=f"tool:{self.tool_name}",
+                sensitivity=params.get("sensitivity", "personal"),
+                expires_at=params.get("expires_at"),
+                context=params.get("context") or {},
+                reason=params.get("reason", ""),
+            )
+            return {"result": res.model_dump()}
 
         if method == "audit":
             db = await get_db()

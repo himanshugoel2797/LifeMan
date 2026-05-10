@@ -97,9 +97,79 @@ def invoke(tool: str, args: dict | None = None, reason: str = "") -> dict:
     return _c().call("invoke", tool=tool, args=args or {}, reason=reason)
 
 
-def notify(message: str, urgency: str = "ambient", channel: str = "web") -> dict:
-    """Post a notification to the user."""
-    return _c().call("notify", message=message, urgency=urgency, channel=channel)
+def notify(
+    message: str,
+    category: str = "status",
+    urgency: str = "ambient",
+    reason: str = "",
+    expires_at: str | None = None,
+    context: dict | None = None,
+) -> dict:
+    """Sugar over `emit_output` for plain-text notifications.
+
+    The router decides which channel(s) carry the event — never specify a
+    channel. Use `emit_output` directly for structured content or actions.
+    """
+    return _c().call(
+        "notify",
+        message=message,
+        category=category,
+        urgency=urgency,
+        reason=reason,
+        expires_at=expires_at,
+        context=context or {},
+    )
+
+
+def emit_output(
+    content: str | dict,
+    category: str = "status",
+    urgency: str = "ambient",
+    reason: str = "",
+    expires_at: str | None = None,
+    sensitivity: str = "personal",
+    context: dict | None = None,
+    actions: list[dict] | None = None,
+) -> dict:
+    """Emit a structured output event for the user.
+
+    `content` may be a plain string or a dict {title, body, fields,
+    image_url, markdown}. `actions` is a list of {label, invoke_tool,
+    invoke_args, confirmation_required}. The router chooses channels —
+    don't pick channels here.
+    """
+    return _c().call(
+        "emit_output",
+        content=content,
+        category=category,
+        urgency=urgency,
+        reason=reason,
+        expires_at=expires_at,
+        sensitivity=sensitivity,
+        context=context or {},
+        actions=actions or [],
+    )
+
+
+def cancel_output(output_id: str, reason: str = "") -> dict:
+    """Recall a previously-emitted output event from every channel."""
+    return _c().call("cancel_output", output_id=output_id, reason=reason)
+
+
+def report_response(
+    output_id: str,
+    action_label: str,
+    channel: str,
+    raw_input: str | None = None,
+) -> dict:
+    """Channel-side: report a user response to an emitted event."""
+    return _c().call(
+        "report_response",
+        output_id=output_id,
+        action_label=action_label,
+        channel=channel,
+        raw_input=raw_input,
+    )
 
 
 def request_permission(
@@ -130,3 +200,91 @@ def audit(limit: int = 20) -> list[dict]:
 def log(message: str) -> None:
     """Send a debug line to the core's logger, prefixed with this tool's id."""
     _c().call("log", message=message)
+
+
+def sse_publish(event_type: str, data: dict) -> None:
+    """Output-channel tools: publish an SSE event for the web UI.
+
+    `event_type` must start with `output.` (the core enforces this so a
+    channel can't impersonate other system events).
+    """
+    _c().call("sse_publish", event_type=event_type, data=data)
+
+
+def list_output_channels() -> list[dict]:
+    """Router tools: enumerate currently-installed output channels."""
+    return _c().call("list_output_channels")
+
+
+# ---------------------------------------------------------------------------
+# Memory, observations, inputs (other routing domains)
+# ---------------------------------------------------------------------------
+
+def record_memory(
+    content: str,
+    type_hint: str | None = None,
+    tags: list[str] | None = None,
+    sensitivity: str = "personal",
+    reason: str = "",
+    expires_at: str | None = None,
+    context: dict | None = None,
+) -> dict:
+    """Emit a memory candidate. The memory router decides whether/how to store."""
+    return _c().call(
+        "record_memory",
+        content=content, type_hint=type_hint, tags=tags or [],
+        sensitivity=sensitivity, reason=reason,
+        expires_at=expires_at, context=context or {},
+    )
+
+
+def recall(
+    query: str | None = None,
+    type: list[str] | None = None,
+    tags: list[str] | None = None,
+    before: str | None = None,
+    after: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Read back from the memory store."""
+    return _c().call(
+        "recall",
+        query=query, type=type, tags=tags,
+        before=before, after=after, limit=limit,
+    )
+
+
+def observe(
+    message: str,
+    level: str = "info",
+    component: str = "",
+    reason: str = "",
+    expires_at: str | None = None,
+    context: dict | None = None,
+) -> dict:
+    """Emit a structured observation. The observation router routes it
+    (archive / summarize / discard). Replaces ad-hoc print/log calls."""
+    return _c().call(
+        "observe",
+        message=message, level=level, component=component, reason=reason,
+        expires_at=expires_at, context=context or {},
+    )
+
+
+def ingest_input(
+    surface: str,
+    raw_payload: str,
+    intent_hint: str | None = None,
+    sensitivity: str = "personal",
+    reason: str = "",
+    expires_at: str | None = None,
+    context: dict | None = None,
+) -> dict:
+    """Inject a unit of input as if it came from a user surface. The input
+    router will dispatch it (typically to the LLM, or to direct_invoke)."""
+    return _c().call(
+        "ingest_input",
+        surface=surface, raw_payload=raw_payload, intent_hint=intent_hint,
+        sensitivity=sensitivity, reason=reason,
+        expires_at=expires_at, context=context or {},
+    )

@@ -198,39 +198,91 @@ def my_permissions() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Memory tools (sugar — routes to memory tool when it exists)
+# Memory tools — route through the memory classifier (lifeman.memory).
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def remember(
+def record_memory(
     content: str,
-    type: str = "episodic",
+    type_hint: str | None = None,
     tags: list[str] | None = None,
     sensitivity: str = "personal",
-    source: str = "live_chat",
+    reason: str = "",
 ) -> dict:
-    """Store a memory. Types: episodic, semantic, identity, summary."""
-    return invoke("memory_store", {
-        "content": content, "type": type,
-        "tags": tags or [], "sensitivity": sensitivity, "source": source,
-    }, reason="remember")
+    """Emit a memory candidate. The memory router decides whether to store
+    it (and how — episodic, semantic, etc.) or discard it."""
+    with _client() as c:
+        r = c.post("/api/memory", json={
+            "content": content, "type_hint": type_hint, "tags": tags or [],
+            "sensitivity": sensitivity, "reason": reason,
+        })
+        r.raise_for_status()
+        return r.json()
 
 
 @mcp.tool()
 def recall(
-    query: str,
+    query: str | None = None,
     type: list[str] | None = None,
     tags: list[str] | None = None,
     before: str | None = None,
     after: str | None = None,
     limit: int = 10,
 ) -> list[dict]:
-    """Search memories by query, type, tags, or time range."""
-    result = invoke("memory_recall", {
-        "query": query, "type": type, "tags": tags,
-        "before": before, "after": after, "limit": limit,
-    }, reason="recall")
-    return result.get("result", []) if isinstance(result, dict) else []
+    """Search the memory store by query, type, tags, or time range."""
+    params: dict = {"limit": limit}
+    if query: params["query"] = query
+    if type: params["type"] = type
+    if tags: params["tags"] = tags
+    if before: params["before"] = before
+    if after: params["after"] = after
+    with _client() as c:
+        r = c.get("/api/memory", params=params)
+        r.raise_for_status()
+        return r.json()
+
+
+# ---------------------------------------------------------------------------
+# Observations (lifeman.observations)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def observe(
+    message: str,
+    level: str = "info",
+    component: str = "",
+    reason: str = "",
+) -> dict:
+    """Emit a structured observation. Router decides archive/summarize/discard."""
+    with _client() as c:
+        r = c.post("/api/observations", json={
+            "message": message, "level": level, "component": component,
+            "reason": reason,
+        })
+        r.raise_for_status()
+        return r.json()
+
+
+# ---------------------------------------------------------------------------
+# Inputs (lifeman.inputs)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ingest_input(
+    surface: str,
+    raw_payload: str,
+    intent_hint: str | None = None,
+    reason: str = "",
+) -> dict:
+    """Inject a unit of input as if it came from a user surface. Input router
+    dispatches it (typically to the live LLM, or to direct_invoke)."""
+    with _client() as c:
+        r = c.post("/api/inputs", json={
+            "surface": surface, "raw_payload": raw_payload,
+            "intent_hint": intent_hint, "reason": reason,
+        })
+        r.raise_for_status()
+        return r.json()
 
 
 # ---------------------------------------------------------------------------
@@ -299,17 +351,63 @@ def audit_log(
 @mcp.tool()
 def notify(
     message: str,
+    category: str = "status",
     urgency: str = "ambient",
-    channel: str = "web",
     context: dict | None = None,
     expires_at: str | None = None,
+    reason: str = "",
 ) -> dict:
-    """Send a notification to the user."""
+    """Sugar over emit_output for plain-text notifications.
+
+    The router picks channels — never specify one. Use `emit_output` when
+    you need structured content or response actions.
+    """
     with _client() as c:
         r = c.post("/api/notifications", json={
-            "message": message, "urgency": urgency, "channel": channel,
-            "context": context, "expires_at": expires_at,
+            "message": message, "category": category, "urgency": urgency,
+            "context": context, "expires_at": expires_at, "reason": reason,
         })
+        r.raise_for_status()
+        return r.json()
+
+
+@mcp.tool()
+def emit_output(
+    content: str | dict,
+    category: str = "status",
+    urgency: str = "ambient",
+    context: dict | None = None,
+    expires_at: str | None = None,
+    sensitivity: str = "personal",
+    actions: list[dict] | None = None,
+    reason: str = "",
+) -> dict:
+    """Emit a structured output event. Router decides channels.
+
+    `content` may be a plain string or {title, body, fields, image_url,
+    markdown}. `actions` are response buttons; channels that can't capture
+    them will ignore them.
+    """
+    with _client() as c:
+        r = c.post("/api/outputs", json={
+            "content": content,
+            "category": category,
+            "urgency": urgency,
+            "context": context or {},
+            "expires_at": expires_at,
+            "sensitivity": sensitivity,
+            "actions": actions or [],
+            "reason": reason,
+        })
+        r.raise_for_status()
+        return r.json()
+
+
+@mcp.tool()
+def cancel_output(output_id: str, reason: str) -> dict:
+    """Recall a previously-emitted output event from every channel."""
+    with _client() as c:
+        r = c.post(f"/api/outputs/{output_id}/cancel", params={"reason": reason})
         r.raise_for_status()
         return r.json()
 

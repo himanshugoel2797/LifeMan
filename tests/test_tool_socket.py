@@ -88,18 +88,29 @@ async def test_invoke_missing_tool_returns_error(temp_db):
 
 
 @pytest.mark.asyncio
-async def test_notify_persists_and_returns_id(temp_db):
+async def test_notify_routes_through_output_system(temp_db):
+    """`notify` is sugar over emit_output; its result includes an output_id
+    and the channels the router dispatched to."""
     async with ToolSocket("inv-1", "tool-x", "test", None) as ts:
         [resp] = await _send_recv(
             str(ts.socket_path),
-            {"method": "notify", "params": {"message": "hello", "urgency": "high"}},
+            {"method": "notify", "params": {
+                "message": "hello",
+                "category": "alert",
+                "urgency": "soft",
+            }},
         )
-    assert "result" in resp and "id" in resp["result"]
+    assert "result" in resp
+    res = resp["result"]
+    assert "output_id" in res
+    # `alert` category in DEFAULT_RULES routes to web_toast + web_persistent.
+    # web_persistent writes a row in notifications; check the event was stored.
     rows = await temp_db.execute_fetchall(
-        "SELECT message, urgency FROM notifications WHERE id = ?", (resp["result"]["id"],)
+        "SELECT category, urgency FROM output_events WHERE id = ?", (res["output_id"],),
     )
     assert len(rows) == 1
-    assert dict(rows[0]) == {"message": "hello", "urgency": "high"}
+    assert dict(rows[0]) == {"category": "alert", "urgency": "soft"}
+    assert "web_persistent" in res["dispatched"]
 
 
 @pytest.mark.asyncio

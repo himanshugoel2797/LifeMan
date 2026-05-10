@@ -1,49 +1,38 @@
-"""Notification routes."""
+"""Notification routes — legacy entry point that now defers to the output
+system.
+
+Kept for compatibility with the existing web UI panel and any external
+clients that already POST `/api/notifications`. New callers should use
+`/api/outputs` directly. The `channel` parameter is no longer accepted,
+per OUTPUT_DESIGN.MD §"MCP surface changes"."""
 
 from __future__ import annotations
 
 import json
-import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from lifeman.auth import require_auth
 from lifeman.db import get_db
 from lifeman.models import IdResponse, Notification, NotificationCreate, OkResponse
-from lifeman.sse import bus
+from lifeman.outputs import emit_output
 
 router = APIRouter()
 
 
 @router.post("", response_model=IdResponse)
 async def create_notification(body: NotificationCreate, _: str = Depends(require_auth)):
-    db = await get_db()
-    notif_id = str(uuid.uuid4())[:12]
-    now = datetime.now(timezone.utc).isoformat()
-
-    await db.execute(
-        """INSERT INTO notifications (id, message, urgency, channel, context_json, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (
-            notif_id,
-            body.message,
-            body.urgency,
-            body.channel,
-            json.dumps(body.context) if body.context else None,
-            now,
-            body.expires_at,
-        ),
+    res = await emit_output(
+        content=body.message,
+        category=body.category,
+        urgency=body.urgency,
+        expires_at=body.expires_at,
+        context=body.context or {},
+        reason=body.reason,
+        source_tool="user",
     )
-    await db.commit()
-
-    await bus.publish("notification", {
-        "id": notif_id,
-        "message": body.message,
-        "urgency": body.urgency,
-    })
-
-    return IdResponse(id=notif_id)
+    return IdResponse(id=res.output_id)
 
 
 @router.get("", response_model=list[Notification])

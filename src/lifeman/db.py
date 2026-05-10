@@ -105,6 +105,217 @@ CREATE TABLE IF NOT EXISTS notifications (
     dismissed_at TEXT
 );
 
+-- Output system: structured events, routing decisions, channel registry,
+-- per-channel deliveries. See OUTPUT_DESIGN.MD.
+CREATE TABLE IF NOT EXISTS output_events (
+    id TEXT PRIMARY KEY,
+    source_tool TEXT NOT NULL DEFAULT '',
+    content_json TEXT NOT NULL,           -- str OR StructuredContent dict
+    category TEXT NOT NULL DEFAULT 'status',
+    urgency TEXT NOT NULL DEFAULT 'ambient',
+    sensitivity TEXT NOT NULL DEFAULT 'personal',
+    expires_at TEXT,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    actions_json TEXT NOT NULL DEFAULT '[]',
+    reason TEXT NOT NULL DEFAULT '',
+    emitted_at TEXT NOT NULL,
+    cancelled_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS output_channels (
+    name TEXT PRIMARY KEY,
+    channel_type TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL DEFAULT '{}',
+    rate_limit_per_minute INTEGER NOT NULL DEFAULT 0,
+    rate_limit_per_hour INTEGER NOT NULL DEFAULT 0,
+    sensitivity_tolerance TEXT NOT NULL DEFAULT 'personal',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    installed_at TEXT NOT NULL,
+    disabled_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS output_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    output_id TEXT NOT NULL REFERENCES output_events(id),
+    channel TEXT NOT NULL,
+    delivered INTEGER NOT NULL DEFAULT 0,
+    delivery_id TEXT,
+    failure_reason TEXT,
+    response_json TEXT,
+    delivered_at TEXT NOT NULL,
+    cancelled_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS output_routing_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    output_id TEXT NOT NULL REFERENCES output_events(id),
+    matched_rules_json TEXT NOT NULL DEFAULT '[]',
+    candidate_channels_json TEXT NOT NULL DEFAULT '[]',
+    filtered_json TEXT NOT NULL DEFAULT '{}',
+    dispatched_json TEXT NOT NULL DEFAULT '[]',
+    expired INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    decided_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS output_routing_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position INTEGER NOT NULL,
+    match_json TEXT NOT NULL DEFAULT '{}',
+    action_json TEXT NOT NULL DEFAULT '{}',
+    description TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_output_events_emitted ON output_events(emitted_at);
+CREATE INDEX IF NOT EXISTS idx_output_events_category ON output_events(category);
+CREATE INDEX IF NOT EXISTS idx_output_deliveries_output ON output_deliveries(output_id);
+CREATE INDEX IF NOT EXISTS idx_output_routing_audit_output ON output_routing_audit(output_id);
+CREATE INDEX IF NOT EXISTS idx_output_routing_rules_position ON output_routing_rules(position);
+
+-- ---------------------------------------------------------------------------
+-- Input routing (lifeman.inputs) — user input surfaces routed to handlers.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS input_events (
+    id TEXT PRIMARY KEY,
+    surface TEXT NOT NULL,             -- voice | chat | notification_click | watch | api
+    raw_payload TEXT NOT NULL DEFAULT '',
+    intent_hint TEXT,
+    source TEXT NOT NULL DEFAULT '',
+    sensitivity TEXT NOT NULL DEFAULT 'personal',
+    expires_at TEXT,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    reason TEXT NOT NULL DEFAULT '',
+    emitted_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS input_routing_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    matched_rules_json TEXT NOT NULL DEFAULT '[]',
+    candidate_handlers_json TEXT NOT NULL DEFAULT '[]',
+    filtered_json TEXT NOT NULL DEFAULT '{}',
+    dispatched_json TEXT NOT NULL DEFAULT '[]',
+    expired INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    decided_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS input_dispatches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    handler TEXT NOT NULL,
+    ok INTEGER NOT NULL DEFAULT 0,
+    external_id TEXT,
+    failure_reason TEXT,
+    dispatched_at TEXT NOT NULL
+);
+
+-- ---------------------------------------------------------------------------
+-- Memory writes (lifeman.memory) — "this seems memory-worthy" → classify → store.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS memory_events (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    type_hint TEXT,                    -- caller suggestion: episodic | semantic | identity | summary
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    source TEXT NOT NULL DEFAULT '',
+    sensitivity TEXT NOT NULL DEFAULT 'personal',
+    expires_at TEXT,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    reason TEXT NOT NULL DEFAULT '',
+    emitted_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS memory_routing_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    matched_rules_json TEXT NOT NULL DEFAULT '[]',
+    candidate_handlers_json TEXT NOT NULL DEFAULT '[]',
+    filtered_json TEXT NOT NULL DEFAULT '{}',
+    dispatched_json TEXT NOT NULL DEFAULT '[]',
+    expired INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    decided_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS memory_dispatches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    handler TEXT NOT NULL,
+    ok INTEGER NOT NULL DEFAULT 0,
+    external_id TEXT,
+    failure_reason TEXT,
+    dispatched_at TEXT NOT NULL
+);
+
+-- handler-side: the actual memory store the default writer writes into.
+CREATE TABLE IF NOT EXISTS memories (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'episodic',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    sensitivity TEXT NOT NULL DEFAULT 'personal',
+    source TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    classified_by TEXT NOT NULL DEFAULT 'router'
+);
+
+-- ---------------------------------------------------------------------------
+-- Observations (lifeman.observations) — log/observability events routed to
+-- archive / summarize / discard handlers.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS observation_events (
+    id TEXT PRIMARY KEY,
+    level TEXT NOT NULL DEFAULT 'info',  -- debug | info | warn | error
+    message TEXT NOT NULL,
+    component TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    sensitivity TEXT NOT NULL DEFAULT 'personal',
+    expires_at TEXT,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    reason TEXT NOT NULL DEFAULT '',
+    emitted_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS observation_routing_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    matched_rules_json TEXT NOT NULL DEFAULT '[]',
+    candidate_handlers_json TEXT NOT NULL DEFAULT '[]',
+    filtered_json TEXT NOT NULL DEFAULT '{}',
+    dispatched_json TEXT NOT NULL DEFAULT '[]',
+    expired INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    decided_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS observation_dispatches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    handler TEXT NOT NULL,
+    ok INTEGER NOT NULL DEFAULT 0,
+    external_id TEXT,
+    failure_reason TEXT,
+    dispatched_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS observations (
+    id TEXT PRIMARY KEY,
+    level TEXT NOT NULL DEFAULT 'info',
+    message TEXT NOT NULL,
+    component TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    context_json TEXT,
+    archived_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_input_events_emitted ON input_events(emitted_at);
+CREATE INDEX IF NOT EXISTS idx_memory_events_emitted ON memory_events(emitted_at);
+CREATE INDEX IF NOT EXISTS idx_observation_events_emitted ON observation_events(emitted_at);
+CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
+CREATE INDEX IF NOT EXISTS idx_observations_archived ON observations(archived_at);
+CREATE INDEX IF NOT EXISTS idx_observations_level ON observations(level);
+
 CREATE TABLE IF NOT EXISTS build_requests (
     id TEXT PRIMARY KEY,
     description TEXT NOT NULL,
