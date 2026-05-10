@@ -223,6 +223,104 @@
             color: var(--text-dim);
             font-size: 12px;
         }
+        .chat-layout {
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 48px);
+            gap: 12px;
+        }
+        .chat-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+        .chat-stream {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 8px 4px;
+        }
+        .msg {
+            border: 1px solid var(--border);
+            background: var(--surface);
+            border-radius: 6px;
+            padding: 10px 14px;
+            max-width: 88%;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .msg-user {
+            align-self: flex-end;
+            background: var(--surface2);
+            border-color: var(--accent);
+        }
+        .msg-assistant {
+            align-self: flex-start;
+        }
+        .msg-tool {
+            align-self: flex-start;
+            background: #11161e;
+            border-color: var(--border);
+            font-size: 12px;
+            color: var(--text-dim);
+            max-width: 88%;
+        }
+        .msg-role {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-dim);
+            margin-bottom: 4px;
+        }
+        .chat-composer {
+            display: flex;
+            gap: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+        }
+        .chat-composer textarea {
+            flex: 1;
+            font-family: inherit;
+            font-size: 14px;
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 10px 12px;
+            min-height: 60px;
+            resize: vertical;
+        }
+        .chat-composer textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .session-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .session-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            text-decoration: none;
+            color: var(--text);
+        }
+        .session-row:hover {
+            border-color: var(--accent);
+        }
+        .tool-event {
+            font-size: 11px;
+            color: var(--warning);
+            padding: 4px 0;
+        }
     </style>
 </head>
 <body>
@@ -230,6 +328,8 @@
         <nav>
             <div class="brand">lifeman</div>
             <a href="/" class="{% if active_page == 'index' %}active{% endif %}">Dashboard</a>
+            <a href="/chat?surface=live_chat" class="{% if active_page == 'live_chat' %}active{% endif %}">Live Chat</a>
+            <a href="/chat?surface=build_chat" class="{% if active_page == 'build_chat' %}active{% endif %}">Build Chat</a>
             <a href="/tools" class="{% if active_page == 'tools' %}active{% endif %}">Tools</a>
             <a href="/permissions" class="{% if active_page == 'permissions' %}active{% endif %}">
                 Permissions
@@ -245,6 +345,7 @@
         </main>
     </div>
     <script>
+        window.LIFEMAN_TOKEN = "{{ api_token | default('') }}";
         // SSE for real-time updates
         const evtSource = new EventSource('/events');
         evtSource.addEventListener('permission_requested', (e) => {

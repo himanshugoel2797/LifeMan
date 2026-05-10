@@ -10,11 +10,16 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
+from lifeman.config import settings
 from lifeman.db import get_db
 from lifeman.sse import bus
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
+
+# Inject the bearer token into every UI page so browser JS can call the API.
+# Server is local-only, so the token isn't a meaningful secret to the page.
+templates.env.globals["api_token"] = settings.token
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -120,6 +125,64 @@ async def schedules_page(request: Request):
         request,
         "schedules.html",
         {"schedules": [dict(r) for r in active]},
+    )
+
+
+@router.get("/chat", response_class=HTMLResponse)
+async def chat_index(request: Request, surface: str = "live_chat"):
+    if surface not in ("live_chat", "build_chat"):
+        surface = "live_chat"
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT * FROM sessions WHERE surface = ? AND archived_at IS NULL "
+        "ORDER BY last_message_at DESC LIMIT 50",
+        (surface,),
+    )
+    return templates.TemplateResponse(
+        request,
+        "chat_index.html",
+        {
+            "surface": surface,
+            "sessions": [dict(r) for r in rows],
+        },
+    )
+
+
+@router.get("/chat/{session_id}", response_class=HTMLResponse)
+async def chat_session(request: Request, session_id: str):
+    db = await get_db()
+    rows = await db.execute_fetchall("SELECT * FROM sessions WHERE id = ?", (session_id,))
+    if not rows:
+        return HTMLResponse("<h1>Session not found</h1>", status_code=404)
+    session = dict(rows[0])
+
+    msg_rows = await db.execute_fetchall(
+        "SELECT * FROM messages WHERE session_id = ? ORDER BY seq ASC",
+        (session_id,),
+    )
+    messages = []
+    for m in msg_rows:
+        m = dict(m)
+        if m.get("tool_calls_json"):
+            try:
+                m["tool_calls"] = json.loads(m["tool_calls_json"])
+            except json.JSONDecodeError:
+                m["tool_calls"] = None
+        messages.append(m)
+
+    workspace_tools: list[dict] = []
+    if session["surface"] == "build_chat":
+        from lifeman.build_chat import list_workspace_tools
+        workspace_tools = list_workspace_tools(session_id)
+
+    return templates.TemplateResponse(
+        request,
+        "chat_session.html",
+        {
+            "session": session,
+            "messages": messages,
+            "workspace_tools": workspace_tools,
+        },
     )
 
 

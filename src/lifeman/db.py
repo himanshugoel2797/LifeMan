@@ -114,10 +114,26 @@ CREATE TABLE IF NOT EXISTS build_requests (
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     surface TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    external_id TEXT,
     started_at TEXT NOT NULL,
     last_message_at TEXT NOT NULL,
-    message_count INTEGER NOT NULL DEFAULT 0
+    message_count INTEGER NOT NULL DEFAULT 0,
+    archived_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    tool_calls_json TEXT,
+    tool_call_id TEXT,
+    created_at TEXT NOT NULL,
+    seq INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
 
 CREATE INDEX IF NOT EXISTS idx_invocations_tool ON invocations(tool);
 CREATE INDEX IF NOT EXISTS idx_invocations_started ON invocations(started_at);
@@ -127,6 +143,13 @@ CREATE INDEX IF NOT EXISTS idx_schedules_fires_at ON schedules(fires_at);
 CREATE INDEX IF NOT EXISTS idx_permissions_grantee ON permissions(grantee);
 CREATE INDEX IF NOT EXISTS idx_permission_requests_status ON permission_requests(status);
 """
+
+
+_SESSION_COLUMN_ADDS = [
+    ("title", "TEXT NOT NULL DEFAULT ''"),
+    ("external_id", "TEXT"),
+    ("archived_at", "TEXT"),
+]
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -139,6 +162,11 @@ async def get_db() -> aiosqlite.Connection:
         await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA foreign_keys=ON")
         await _db.executescript(SCHEMA)
+        # Lightweight migration: add new sessions columns if upgrading from older schema.
+        existing = {r["name"] for r in await _db.execute_fetchall("PRAGMA table_info(sessions)")}
+        for col, ddl in _SESSION_COLUMN_ADDS:
+            if col not in existing:
+                await _db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {ddl}")
         await _db.commit()
     return _db
 

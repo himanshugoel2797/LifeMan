@@ -1,0 +1,252 @@
+{% extends "base.html" %}
+{% set active_page = session.surface %}
+
+{% block title %}{{ session.title or session.id }}{% endblock %}
+
+{% block content %}
+<div class="chat-toolbar">
+    <div>
+        <h1 style="margin: 0; font-size: 16px;">{{ session.title or session.id }}</h1>
+        <div class="reason">
+            <span class="tag">{{ session.surface }}</span>
+            · <a href="/chat?surface={{ session.surface }}" style="color: var(--text-dim);">back to sessions</a>
+        </div>
+    </div>
+    {% if session.surface == "build_chat" %}
+    <button class="btn" id="refresh-workspace-btn">Refresh workspace</button>
+    {% endif %}
+</div>
+
+{% if session.surface == "build_chat" and workspace_tools %}
+<div class="card" style="margin-top: 12px;">
+    <div class="card-title">Workspace artifacts</div>
+    <div class="reason">Tools that Claude has saved to <code>./out/</code> in this session's workspace.</div>
+    <table style="margin-top: 10px;">
+        <thead><tr><th>Name</th><th>Manifest</th><th>Code</th><th></th></tr></thead>
+        <tbody id="workspace-tbody">
+            {% for t in workspace_tools %}
+            <tr>
+                <td>{{ t.name }}</td>
+                <td class="reason">{{ t.manifest | tojson | truncate(80) }}</td>
+                <td class="reason">{{ t.code_size }} bytes</td>
+                <td><button class="btn btn-success register-btn" data-name="{{ t.name }}">Register</button></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<div class="chat-layout" style="margin-top: 12px;">
+    <div class="chat-stream" id="stream">
+        {% for m in messages %}
+            {% if m.role == "user" %}
+            <div class="msg msg-user"><div class="msg-role">you</div>{{ m.content }}</div>
+            {% elif m.role == "assistant" %}
+            <div class="msg msg-assistant">
+                <div class="msg-role">assistant</div>
+                {{ m.content }}
+                {% if m.tool_calls %}
+                    {% for tc in m.tool_calls %}
+                    <div class="tool-event">→ tool: {{ tc.function.name if tc.function is defined else tc.name }}</div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+            {% elif m.role == "tool" %}
+            <div class="msg msg-tool"><div class="msg-role">tool result</div>{{ m.content | truncate(400) }}</div>
+            {% endif %}
+        {% endfor %}
+    </div>
+
+    <form class="chat-composer" id="composer" {% if session.archived_at %}style="display:none;"{% endif %}>
+        <textarea id="input" placeholder="Type a message…" required></textarea>
+        <button type="submit" class="btn btn-success" id="send-btn">Send</button>
+    </form>
+</div>
+
+<script>
+(() => {
+    const sessionId = {{ session.id | tojson }};
+    const surface = {{ session.surface | tojson }};
+    const stream = document.getElementById('stream');
+    const form = document.getElementById('composer');
+    const input = document.getElementById('input');
+    const sendBtn = document.getElementById('send-btn');
+    const token = window.LIFEMAN_TOKEN;
+
+    const scrollToEnd = () => { stream.scrollTop = stream.scrollHeight; };
+    scrollToEnd();
+
+    const appendUser = (text) => {
+        const el = document.createElement('div');
+        el.className = 'msg msg-user';
+        el.innerHTML = '<div class="msg-role">you</div>';
+        el.appendChild(document.createTextNode(text));
+        stream.appendChild(el);
+        scrollToEnd();
+    };
+
+    const startAssistant = () => {
+        const el = document.createElement('div');
+        el.className = 'msg msg-assistant';
+        const role = document.createElement('div');
+        role.className = 'msg-role';
+        role.textContent = 'assistant';
+        const body = document.createElement('span');
+        body.className = 'assistant-body';
+        el.appendChild(role);
+        el.appendChild(body);
+        stream.appendChild(el);
+        scrollToEnd();
+        return body;
+    };
+
+    const appendToolEvent = (host, text, cls) => {
+        const e = document.createElement('div');
+        e.className = cls || 'tool-event';
+        e.textContent = text;
+        host.appendChild(e);
+        scrollToEnd();
+    };
+
+    /** Parse SSE-formatted text from a fetch() ReadableStream. */
+    async function* parseSSE(response) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+                if (buf.trim()) yield parseFrame(buf);
+                return;
+            }
+            buf += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buf.indexOf('\n\n')) >= 0) {
+                const frame = buf.slice(0, idx);
+                buf = buf.slice(idx + 2);
+                if (frame.trim()) yield parseFrame(frame);
+            }
+        }
+    }
+
+    function parseFrame(frame) {
+        const out = { event: 'message', data: '' };
+        for (const line of frame.split('\n')) {
+            if (line.startsWith('event:')) out.event = line.slice(6).trim();
+            else if (line.startsWith('data:')) out.data += line.slice(5).trim();
+        }
+        return out;
+    }
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const content = input.value.trim();
+        if (!content) return;
+        input.value = '';
+        sendBtn.disabled = true;
+
+        appendUser(content);
+        const body = startAssistant();
+
+        try {
+            const r = await fetch(`/api/chat/sessions/${sessionId}/messages`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + token,
+                    'Accept': 'text/event-stream',
+                },
+                body: JSON.stringify({ content }),
+            });
+            if (!r.ok) {
+                appendToolEvent(body.parentElement, '[error] ' + r.status + ' ' + await r.text(), 'tool-event');
+                sendBtn.disabled = false;
+                return;
+            }
+
+            for await (const evt of parseSSE(r)) {
+                let data = {};
+                try { data = JSON.parse(evt.data || '{}'); } catch (e) {}
+
+                if (evt.event === 'delta') {
+                    body.appendChild(document.createTextNode(data.text || ''));
+                    scrollToEnd();
+                } else if (evt.event === 'tool_call') {
+                    appendToolEvent(body.parentElement, '→ ' + (data.name || 'tool') +
+                        (data.args_raw ? ' ' + data.args_raw : (data.args ? ' ' + JSON.stringify(data.args) : '')));
+                } else if (evt.event === 'tool_result') {
+                    appendToolEvent(body.parentElement,
+                        (data.ok ? '✓' : '✗') + ' ' + (data.summary || ''));
+                } else if (evt.event === 'error') {
+                    appendToolEvent(body.parentElement, '[error] ' + (data.message || ''));
+                } else if (evt.event === 'done') {
+                    if (surface === 'build_chat') refreshWorkspace();
+                    break;
+                }
+            }
+        } catch (err) {
+            appendToolEvent(body.parentElement, '[network error] ' + err.message);
+        } finally {
+            sendBtn.disabled = false;
+            input.focus();
+        }
+    });
+
+    async function refreshWorkspace() {
+        if (surface !== 'build_chat') return;
+        try {
+            const r = await fetch(`/api/chat/sessions/${sessionId}/workspace`, {
+                headers: { 'Authorization': 'Bearer ' + token },
+            });
+            if (!r.ok) return;
+            const data = await r.json();
+            const tbody = document.getElementById('workspace-tbody');
+            if (!tbody) {
+                if (data.tools.length > 0) location.reload();
+                return;
+            }
+            tbody.innerHTML = '';
+            for (const t of data.tools) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${t.name}</td>
+                    <td class="reason">${JSON.stringify(t.manifest).slice(0, 80)}</td>
+                    <td class="reason">${t.code_size} bytes</td>
+                    <td><button class="btn btn-success register-btn" data-name="${t.name}">Register</button></td>
+                `;
+                tbody.appendChild(tr);
+            }
+            wireRegisterButtons();
+        } catch (e) { /* best-effort */ }
+    }
+
+    function wireRegisterButtons() {
+        for (const btn of document.querySelectorAll('.register-btn')) {
+            btn.onclick = async () => {
+                const name = btn.dataset.name;
+                btn.disabled = true;
+                btn.textContent = 'Registering…';
+                const r = await fetch(`/api/chat/sessions/${sessionId}/workspace/${encodeURIComponent(name)}/register`, {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token },
+                });
+                if (r.ok) {
+                    const data = await r.json();
+                    btn.textContent = '✓ ' + data.id;
+                    btn.classList.remove('btn-success');
+                } else {
+                    btn.disabled = false;
+                    btn.textContent = 'Register';
+                    alert('Register failed: ' + await r.text());
+                }
+            };
+        }
+    }
+    wireRegisterButtons();
+
+    const refreshBtn = document.getElementById('refresh-workspace-btn');
+    if (refreshBtn) refreshBtn.onclick = refreshWorkspace;
+})();
+</script>
+{% endblock %}

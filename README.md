@@ -19,7 +19,7 @@ The core insight: build the smallest system that can build the rest of itself. R
      ┌─────┴─────┐    ┌──────┴──────┐
      │  Web UI   │    │  Local LLM  │
      │ HTMX/Jinja│    │ Qwen via    │
-     │           │    │ llama-server│
+     │           │    │   Ollama    │
      └───────────┘    └─────────────┘
 ```
 
@@ -46,6 +46,11 @@ The core insight: build the smallest system that can build the rest of itself. R
 # Install dependencies
 uv sync
 
+# Install Ollama (one-time) — https://ollama.com
+# lifeman will auto-start `ollama serve` as a managed child process. Pull a
+# tool-calling-capable model before first use:
+ollama pull qwen3.5:latest
+
 # Run the server
 export LIFEMAN_TOKEN=your-secret-token
 uv run lifeman
@@ -55,6 +60,10 @@ uv run uvicorn lifeman.main:app --host 127.0.0.1 --port 8390
 ```
 
 Open http://127.0.0.1:8390 for the web UI.
+
+If `ollama serve` is already running on its default port, lifeman will use
+that instance instead of starting a new one. Set `LIFEMAN_OLLAMA_AUTOSTART=false`
+to opt out of auto-management.
 
 ## API
 
@@ -129,7 +138,12 @@ All settings can be set via environment variables prefixed with `LIFEMAN_`:
 | `LIFEMAN_HOST` | `127.0.0.1` | Server bind address |
 | `LIFEMAN_PORT` | `8390` | Server port |
 | `LIFEMAN_SANDBOX_ENABLED` | `true` | Enable bubblewrap sandboxing |
-| `LIFEMAN_LLAMA_SERVER_URL` | `http://127.0.0.1:8080` | llama-server URL |
+| `LIFEMAN_LLM_BASE_URL` | `http://127.0.0.1:11434` | LLM backend URL (Ollama or any OpenAI-compatible server) |
+| `LIFEMAN_LLM_MODEL` | `qwen3.5:latest` | Model name to use for live chat |
+| `LIFEMAN_OLLAMA_BIN` | `ollama` | Path to the `ollama` binary |
+| `LIFEMAN_OLLAMA_AUTOSTART` | `true` | If true, spawn `ollama serve` on startup when not already running |
+| `LIFEMAN_OLLAMA_STARTUP_TIMEOUT` | `30` | Seconds to wait for Ollama to become healthy |
+| `LIFEMAN_CLAUDE_CLI` | `claude` | Path to Claude Code CLI for build-chat sessions |
 
 ## License
 

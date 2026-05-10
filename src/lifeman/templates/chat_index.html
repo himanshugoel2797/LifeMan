@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% set active_page = surface %}
+
+{% block title %}lifeman — {{ "Live" if surface == "live_chat" else "Build" }} Chat{% endblock %}
+
+{% block content %}
+<div class="chat-toolbar">
+    <h1 style="margin: 0;">
+        {% if surface == "live_chat" %}Live Chat{% else %}Build Chat{% endif %}
+    </h1>
+    <button class="btn btn-success" id="new-session-btn">+ New session</button>
+</div>
+
+<p class="reason" style="margin: 12px 0 20px;">
+    {% if surface == "live_chat" %}
+    Talk to a local model running on Ollama. The model can invoke registered
+    tools, schedule reminders, send notifications, and request new tools to
+    be built.
+    <span id="llm-status-line"></span>
+    {% else %}
+    Wraps the Claude Code CLI in a per-session workspace. Use this to design
+    and write new tools that plug into the lifeman registry. When Claude saves
+    files under <code>./out/&lt;tool&gt;/</code>, you'll be able to register them
+    from the session view.
+    {% endif %}
+</p>
+
+{% if sessions %}
+<div class="session-list">
+    {% for s in sessions %}
+    <a href="/chat/{{ s.id }}" class="session-row">
+        <div>
+            <div style="color: var(--text);">{{ s.title or s.id }}</div>
+            <div class="reason">{{ s.message_count }} messages · last active {{ s.last_message_at[:19] }}</div>
+        </div>
+        <span class="tag">{{ s.surface }}</span>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty">No sessions yet. Click "New session" to start.</div>
+{% endif %}
+
+<script>
+async function refreshLlmStatus() {
+    const el = document.getElementById('llm-status-line');
+    if (!el) return;
+    try {
+        const r = await fetch('/api/chat/llm/status', {
+            headers: { 'Authorization': 'Bearer ' + window.LIFEMAN_TOKEN },
+        });
+        if (!r.ok) return;
+        const s = await r.json();
+        if (!s.healthy) {
+            el.innerHTML = ` <span class="tag" style="border-color: var(--danger); color: var(--danger);">Ollama down at ${s.base_url}</span>`;
+        } else if (!s.model_installed) {
+            el.innerHTML = ` <span class="tag" style="border-color: var(--warning); color: var(--warning);">Model '${s.model}' not pulled — run: ollama pull ${s.model}</span>`;
+        } else {
+            el.innerHTML = ` <span class="tag tag-success">Ollama up · ${s.model}</span>`;
+        }
+    } catch (e) { /* ignore */ }
+}
+if (document.getElementById('llm-status-line')) refreshLlmStatus();
+
+document.getElementById('new-session-btn').addEventListener('click', async () => {
+    const r = await fetch('/api/chat/sessions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + (window.LIFEMAN_TOKEN || prompt('Bearer token:')),
+        },
+        body: JSON.stringify({ surface: '{{ surface }}' }),
+    });
+    if (!r.ok) {
+        alert('Failed to create session: ' + await r.text());
+        return;
+    }
+    const data = await r.json();
+    window.location.href = '/chat/' + data.id;
+});
+</script>
+{% endblock %}

@@ -24,14 +24,33 @@ class Settings(BaseSettings):
     sandbox_enabled: bool = True
     bwrap_path: str = "bwrap"
 
-    # LLM
-    llama_server_url: str = "http://127.0.0.1:8080"
+    # LLM (Ollama, OpenAI-compatible at /v1/chat/completions)
+    llm_base_url: str = "http://127.0.0.1:11434"
+    llm_model: str = "qwen3.5:latest"
+    llm_system_prompt: str = (
+        "You are lifeman, a personal companion AI running locally on the user's hardware. "
+        "You have access to tools that let you invoke registered tools, schedule reminders, "
+        "request new tools to be built, send notifications, and check the current time. "
+        "Be concise. Use tools when appropriate. Do not guess the time — call the now tool."
+    )
+
+    # Ollama supervisor
+    ollama_bin: str = "ollama"
+    ollama_autostart: bool = True
+    ollama_startup_timeout: float = 30.0
+
+    # Build chat (Claude Code wrapper)
+    claude_cli: str = "claude"
+    build_workspace_dir: Path | None = None  # defaults to data_dir/build_workspaces
 
     def get_db_path(self) -> Path:
         return self.db_path or (self.data_dir / "data.db")
 
     def get_tools_dir(self) -> Path:
         return self.data_dir / "tools"
+
+    def get_build_workspace_dir(self) -> Path:
+        return self.build_workspace_dir or (self.data_dir / "build_workspaces")
 
 
 settings = Settings()

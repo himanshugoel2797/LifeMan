@@ -221,9 +221,40 @@ class BuildRequest(BaseModel):
 class Session(BaseModel):
     id: str
     surface: str  # live_chat | build_chat | scheduled | tool_initiated
+    title: str = ""
+    external_id: str | None = None
     started_at: str
     last_message_at: str
     message_count: int
+    archived_at: str | None = None
+
+
+class SessionCreate(BaseModel):
+    surface: str = "live_chat"  # live_chat | build_chat
+    title: str = ""
+
+
+class SessionUpdate(BaseModel):
+    title: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Chat message models
+# ---------------------------------------------------------------------------
+
+class ChatMessage(BaseModel):
+    id: str
+    session_id: str
+    role: str  # user | assistant | tool | system
+    content: str
+    tool_calls: list[dict] | None = None
+    tool_call_id: str | None = None
+    created_at: str
+    seq: int
+
+
+class ChatSendRequest(BaseModel):
+    content: str
 
 
 # ---------------------------------------------------------------------------

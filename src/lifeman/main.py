@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from lifeman.config import settings
 from lifeman.db import get_db, close_db
-from lifeman import scheduler
+from lifeman import ollama_supervisor, scheduler
 from lifeman.routes import api_router, ui_router
 
 logging.basicConfig(
@@ -31,6 +31,8 @@ async def lifespan(app: FastAPI):
     db = await get_db()
     log.info("Database ready at %s", settings.get_db_path())
 
+    await ollama_supervisor.start()
+
     await scheduler.start()
     log.info("Scheduler started")
 
@@ -46,6 +48,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     await scheduler.stop()
+    await ollama_supervisor.stop()
     await close_db()
     log.info("Shut down cleanly")
 

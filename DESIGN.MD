@@ -27,7 +27,7 @@ Memory, contracts, interventions, observation — all of these are tools written
 - Python 3.12+ with `uv`
 - FastAPI for HTTP + core API
 - SQLite with FTS5 for storage (single file, transactional, BM25 ranking built-in)
-- llama.cpp `llama-server` serving Qwen 2.5 7B Instruct (GGUF, 4-bit)
+- Ollama as the local LLM runtime (auto-supervised; OpenAI-compatible API)
 - bubblewrap + libseccomp for tool sandboxing
 - Unix socket egress proxy enforcing per-tool URL allowlist
 - Jinja2 + HTMX for web UI, Monaco for diff/code views
@@ -35,7 +35,7 @@ Memory, contracts, interventions, observation — all of these are tools written
 - Claude Code as subprocess (structured output via stream parsing)
 - MCP server exposing tools to local Qwen
 
-Three external binaries (sqlite3, llama-server, bubblewrap). ~12 Python deps. Phase 1 codebase target: 3000–5000 lines of Python plus templates.
+Three external binaries (sqlite3, ollama, bubblewrap). ~12 Python deps. Phase 1 codebase target: 3000–5000 lines of Python plus templates.
 
 ## Architecture
 
@@ -348,7 +348,7 @@ Memory schema is owned by the memory tool, not the core. The core knows nothing 
 
 | # | Duration | Outcome |
 |---|---|---|
-| 1.1 | ~1 week | Core scaffold: FastAPI, SQLite schema for tools/permissions/audit/scheduling, bubblewrap sandbox runner, llama-server with Qwen, MCP server exposing scheduling primitives, web UI shell. **End:** can register a tool by hand, invoke via API, see it run sandboxed. |
+| 1.1 | ~1 week | Core scaffold: FastAPI, SQLite schema for tools/permissions/audit/scheduling, bubblewrap sandbox runner, Ollama with Qwen, MCP server exposing scheduling primitives, web UI shell. **End:** can register a tool by hand, invoke via API, see it run sandboxed. |
 | 1.2 | ~1-2 weeks | Build chat UI with system context injection. Permission system with web UI prompts. Live chat with Qwen calling MCP tools. **End:** you build your first real tool through build chat, install it, talk to Qwen through live chat, Qwen invokes the new tool with permission flow working. |
 | 1.3 | ~1-2 weeks | Audit log viewer, scheduled-invocations viewer, basic memory tool built via build chat as the forcing function for the workflow, forget mechanism for the memory tool. **End:** the system can build non-trivial tools and you've used it to build the memory layer. |
 
