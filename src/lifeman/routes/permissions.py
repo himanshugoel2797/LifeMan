@@ -18,7 +18,7 @@ from lifeman.models import (
     PermissionRequestRecord,
     PermissionResolve,
 )
-from lifeman.permissions_runtime import notify_resolved
+from lifeman.permissions_runtime import find_matching_grant, notify_resolved
 from lifeman.sse import bus
 
 router = APIRouter()
@@ -30,18 +30,26 @@ async def request_permission(body: PermissionRequestCreate, _: str = Depends(req
     db = await get_db()
     req_id = str(uuid.uuid4())[:12]
     now = datetime.now(timezone.utc).isoformat()
+    requester = body.scope.get("requester", "llm")
 
-    # Check if already granted
-    existing = await db.execute_fetchall(
-        """SELECT * FROM permissions
-           WHERE grantee = ? AND capability = ? AND revoked_at IS NULL
-           AND (expires_at IS NULL OR expires_at > ?)""",
-        (body.scope.get("requester", "llm"), body.capability, now),
+    # Check if a covering grant already exists. We persist the request row
+    # either way so the returned id is a real DB row callers can later look
+    # up, and so the audit trail records the intent.
+    matching = await find_matching_grant(requester, body.capability, body.scope)
+    initial_status = "granted_always" if matching else "pending"
+    resolved_at = now if matching else None
+
+    await db.execute(
+        """INSERT INTO permission_requests (id, requester, capability, scope_json, reason, status, requested_at, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (req_id, requester, body.capability, json.dumps(body.scope), body.reason, initial_status, now, resolved_at),
     )
-    if existing:
+    await db.commit()
+
+    if matching:
         return PermissionRequestRecord(
             id=req_id,
-            requester=body.scope.get("requester", "llm"),
+            requester=requester,
             capability=body.capability,
             scope=body.scope,
             reason=body.reason,
@@ -49,14 +57,6 @@ async def request_permission(body: PermissionRequestCreate, _: str = Depends(req
             requested_at=now,
             resolved_at=now,
         )
-
-    # Create pending request
-    await db.execute(
-        """INSERT INTO permission_requests (id, requester, capability, scope_json, reason, status, requested_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
-        (req_id, body.scope.get("requester", "llm"), body.capability, json.dumps(body.scope), body.reason, now),
-    )
-    await db.commit()
 
     await audit.log(
         source=body.scope.get("requester", "llm"),
@@ -131,12 +131,14 @@ async def resolve_permission(request_id: str, body: PermissionResolve, _: str = 
     # the single pending request without creating a row, so the next call by
     # the same requester for the same capability will prompt again.
     if body.action == "allow_always":
+        from lifeman.permissions_runtime import grant_expires_at
         perm_id = str(uuid.uuid4())[:12]
         scope = json.loads(req["scope_json"])
+        expires_at = grant_expires_at(scope)
         await db.execute(
-            """INSERT INTO permissions (id, granter, grantee, capability, scope_json, granted_at)
-               VALUES (?, 'user', ?, ?, ?, ?)""",
-            (perm_id, req["requester"], req["capability"], json.dumps(scope), now),
+            """INSERT INTO permissions (id, granter, grantee, capability, scope_json, granted_at, expires_at)
+               VALUES (?, 'user', ?, ?, ?, ?, ?)""",
+            (perm_id, req["requester"], req["capability"], json.dumps(scope), now, expires_at),
         )
 
     await db.commit()

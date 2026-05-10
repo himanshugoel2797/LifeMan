@@ -24,7 +24,7 @@ from typing import Any
 
 from lifeman import audit
 from lifeman.db import get_db
-from lifeman.permissions_runtime import await_permission
+from lifeman.permissions_runtime import await_permission, find_matching_grant
 from lifeman.sse import bus
 
 log = logging.getLogger("lifeman.tool_socket")
@@ -374,14 +374,15 @@ class ToolSocket:
         return {"error": f"unknown method {method!r}"}
 
     async def _check_invoke_capability(self, target: str, reason: str) -> bool:
-        """Tools must hold `invoke:<target>` to invoke another tool."""
+        """Tools must hold `invoke:<target>` to invoke another tool.
+
+        Honours scope (args_match, expires_at) via find_matching_grant so a
+        narrowly-scoped grant doesn't accidentally cover a broader request.
+        """
         db = await get_db()
         cap = f"invoke:{target}"
-        grants = await db.execute_fetchall(
-            "SELECT id FROM permissions WHERE grantee = ? AND capability = ? AND revoked_at IS NULL",
-            (f"tool:{self.tool_name}", cap),
-        )
-        if grants:
+        grantee = f"tool:{self.tool_name}"
+        if await find_matching_grant(grantee, cap, {"target": target}):
             return True
         # No standing grant — request one and wait for the user.
         pid = str(uuid.uuid4())[:12]
@@ -390,7 +391,7 @@ class ToolSocket:
             """INSERT INTO permission_requests
                (id, requester, capability, scope_json, reason, status, requested_at, invocation_id)
                VALUES (?, ?, ?, '{}', ?, 'pending', ?, ?)""",
-            (pid, f"tool:{self.tool_name}", cap, reason, now, self.invocation_id),
+            (pid, grantee, cap, reason, now, self.invocation_id),
         )
         await db.commit()
         await bus.publish("permission_requested", {"id": pid, "capability": cap, "from": self.tool_name})
