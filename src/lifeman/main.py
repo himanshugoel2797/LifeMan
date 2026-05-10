@@ -84,11 +84,34 @@ app.include_router(ui_router)
 def cli():
     """CLI entry point for `lifeman` command."""
     import uvicorn
+    _enforce_loopback_only(settings.host)
     uvicorn.run(
         "lifeman.main:app",
         host=settings.host,
         port=settings.port,
         reload=False,
+    )
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _enforce_loopback_only(host: str) -> None:
+    """Refuse to bind to a non-loopback address.
+
+    The UI surface is unauthenticated by design (browser sessions don't carry
+    bearer tokens, and the page itself templates the token in for JS). On a
+    non-loopback bind, that would expose the audit log, schedule list,
+    secrets metadata, chat history, and the bearer token itself to anyone on
+    the network. Until the UI grows a real cookie-based login, refuse.
+    """
+    if host in _LOOPBACK_HOSTS:
+        return
+    raise SystemExit(
+        f"Refusing to bind to non-loopback host {host!r}: the UI is currently "
+        "unauthenticated and exposing it on a network would leak the audit log, "
+        "secrets metadata, and the API bearer token. Set LIFEMAN_HOST=127.0.0.1 "
+        "(or 'localhost' / '::1'), or implement UI auth before binding wider."
     )
 
 

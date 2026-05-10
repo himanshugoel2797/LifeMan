@@ -111,27 +111,40 @@ def _build_bwrap_cmd(
     """Build the bubblewrap command with layered isolation."""
     bwrap = settings.bwrap_path
     runtime = _runtime_dir()
-    cmd = [
+
+    # Bind paths first so reordering or extending the binds list later doesn't
+    # silently break the command's structure.
+    binds: list[tuple[str, str, str]] = [
+        ("--ro-bind", "/usr", "/usr"),
+        ("--ro-bind", "/bin", "/bin"),
+        ("--ro-bind", "/lib", "/lib"),
+        ("--ro-bind", str(tool_dir), "/tool"),
+        ("--bind", str(scratch_dir), "/scratch"),
+        ("--ro-bind", str(runtime), SANDBOX_RUNTIME_PATH),
+    ]
+
+    # Bind a non-standard Python prefix (e.g. a venv or pyenv install) so
+    # `python3` inside the sandbox finds its stdlib. Skip when the prefix is
+    # already covered by /usr or /.
+    python_path = shutil.which("python3")
+    if python_path:
+        prefix = str(Path(python_path).resolve().parent.parent)
+        if prefix not in ("/usr", "/"):
+            binds.append(("--ro-bind", prefix, prefix))
+
+    cmd: list[str] = [
         bwrap,
         # Namespace isolation
         "--unshare-all",
         "--die-with-parent",
-        # Minimal filesystem
-        "--ro-bind", "/usr", "/usr",
-        "--ro-bind", "/bin", "/bin",
-        "--ro-bind", "/lib", "/lib",
+    ]
+    for flag, src, dst in binds:
+        cmd += [flag, src, dst]
+
+    cmd += [
         "--symlink", "usr/lib64", "/lib64",
-        # Minimal /dev
         "--dev", "/dev",
-        # tmpfs scratch
         "--tmpfs", "/tmp",
-        # Tool code read-only
-        "--ro-bind", str(tool_dir), "/tool",
-        # Scratch space writable
-        "--bind", str(scratch_dir), "/scratch",
-        # lifeman_tool helper (read-only)
-        "--ro-bind", str(runtime), SANDBOX_RUNTIME_PATH,
-        # Working directory
         "--chdir", "/tool",
         # Python path includes the helper dir so tools can `import lifeman_tool`.
         "--setenv", "PYTHONPATH", f"/tool:{SANDBOX_RUNTIME_PATH}",
@@ -146,17 +159,4 @@ def _build_bwrap_cmd(
             "--setenv", "LIFEMAN_TOOL_SOCKET", SANDBOX_SOCKET_PATH,
         ]
     cmd += ["--", "python3", "/tool/run.py"]
-
-    # Bind Python installation if in non-standard location
-    python_path = shutil.which("python3")
-    if python_path:
-        from pathlib import Path as P
-        real = P(python_path).resolve().parent.parent
-        if str(real) not in ("/usr", "/"):
-            cmd[cmd.index("--ro-bind") : cmd.index("--ro-bind")] = []
-            # Add the Python prefix
-            cmd.insert(cmd.index("--chdir"), "--ro-bind")
-            cmd.insert(cmd.index("--chdir"), str(real))
-            cmd.insert(cmd.index("--chdir"), str(real))
-
     return cmd

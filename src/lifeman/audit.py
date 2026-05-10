@@ -35,21 +35,33 @@ async def log(
 
 
 async def query(
-    tool: str | None = None,
+    target: str | None = None,
     source: str | None = None,
+    action: str | None = None,
     before: str | None = None,
     after: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
+    """Query the audit log.
+
+    `target` is matched as an exact string against `audit_log.target`. That
+    column holds different things depending on the action (tool name for
+    invoke, output_id for emit_output, schedule_id for fire_schedule, …),
+    so callers must pick a value appropriate to the action they care about.
+    Use `action` to narrow the result first when target alone is ambiguous.
+    """
     db = await get_db()
     clauses: list[str] = []
     params: list[str] = []
-    if tool:
+    if target:
         clauses.append("target = ?")
-        params.append(tool)
+        params.append(target)
     if source:
         clauses.append("source = ?")
         params.append(source)
+    if action:
+        clauses.append("action = ?")
+        params.append(action)
     if before:
         clauses.append("timestamp < ?")
         params.append(before)

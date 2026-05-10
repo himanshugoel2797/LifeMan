@@ -176,8 +176,9 @@ class AuditEntry(BaseModel):
 
 
 class AuditQuery(BaseModel):
-    tool: str | None = None
+    target: str | None = None
     source: str | None = None
+    action: str | None = None
     before: str | None = None
     after: str | None = None
     limit: int = 50

@@ -333,18 +333,27 @@ def system_status() -> dict:
 
 @mcp.tool()
 def audit_log(
-    tool: str | None = None,
+    target: str | None = None,
     source: str | None = None,
+    action: str | None = None,
     before: str | None = None,
     after: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """Query the system audit log."""
+    """Query the system audit log.
+
+    `target` is the audit row's free-form target field — for `invoke_tool`
+    it's the tool name, for `emit_output` it's the output_id, for
+    `fire_schedule` the schedule id, etc. Pair it with `action` when the
+    bare target value is ambiguous.
+    """
     params = {"limit": limit}
-    if tool:
-        params["tool"] = tool
+    if target:
+        params["target"] = target
     if source:
         params["source"] = source
+    if action:
+        params["action"] = action
     if before:
         params["before"] = before
     if after:
