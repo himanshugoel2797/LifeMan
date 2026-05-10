@@ -1,0 +1,3 @@
+[submodule "LifeManClient"]
+	path = LifeManClient
+	url = git@github.com:himanshugoel2797/LifeManClient.git
