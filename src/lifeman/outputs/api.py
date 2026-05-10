@@ -305,7 +305,7 @@ async def report_response(
         invocation_result.pop("_invocation_id", None)
 
     await audit.log(
-        source=source_tool or f"channel:{channel}" if channel else "user",
+        source=source_tool or (f"channel:{channel}" if channel else "user"),
         action="output_response",
         target=output_id,
         args_summary=action_label,

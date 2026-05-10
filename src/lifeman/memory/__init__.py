@@ -141,7 +141,8 @@ async def recall(
     out: list[Memory] = []
     for r in rows:
         m_tags = json.loads(r["tags_json"]) if r["tags_json"] else []
-        if tags and not any(t in m_tags for t in tags):
+        # AND semantics: every requested tag must be present on the memory.
+        if tags and not all(t in m_tags for t in tags):
             continue
         out.append(Memory(
             id=r["id"], content=r["content"], type=r["type"],

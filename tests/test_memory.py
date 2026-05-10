@@ -49,13 +49,25 @@ async def test_too_short_content_discarded(temp_db):
 
 
 @pytest.mark.asyncio
-async def test_private_without_tags_discarded(temp_db):
+async def test_private_without_tags_routed_to_review(temp_db):
+    """Private + untagged events used to be dropped, leaving tool authors no
+    signal. Route them to memory_store with a needs_review tag instead so
+    the user can audit later."""
     res = await record_memory(
         content="something private to remember",
         sensitivity="private",
         reason="t",
     )
-    assert res.dispatched == ["discard"]
+    assert res.dispatched == ["memory_store"]
+    rows = await temp_db.execute_fetchall(
+        "SELECT external_id FROM memory_dispatches WHERE event_id = ?",
+        (res.event_id,),
+    )
+    mem_id = rows[0]["external_id"]
+    mem = await temp_db.execute_fetchall(
+        "SELECT tags_json FROM memories WHERE id = ?", (mem_id,),
+    )
+    assert "needs_review" in json.loads(mem[0]["tags_json"])
 
 
 @pytest.mark.asyncio

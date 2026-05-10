@@ -225,7 +225,12 @@ async def register_workspace_tool(
 
     manifest_dict = payload.get("manifest") or {}
     # Filter to known manifest fields so unknown keys don't break validation.
-    known = {"reads", "writes", "network", "compute_limits", "triggers", "user_visible"}
+    # Keep `role` and `output_channel` so a build-chat tool can install itself
+    # as e.g. an output channel or router and be discovered by the engine.
+    known = {
+        "reads", "writes", "network", "compute_limits", "triggers",
+        "user_visible", "role", "output_channel",
+    }
     manifest_clean = {k: v for k, v in manifest_dict.items() if k in known}
 
     body = ToolCreate(
@@ -367,9 +372,15 @@ async def _load_history_for_llm(session_id: str) -> list[dict]:
 
 
 async def _stream_live(session_id: str, request: Request):
-    """Run the live-chat loop: model -> tool calls -> model, streaming as we go."""
+    """Run the live-chat loop: model -> tool calls -> model, streaming as we go.
+
+    Always finishes with a `done` event so browser clients can flip out of
+    the "thinking" state regardless of the exit reason. Errors are reported
+    via an `error` event *followed* by `done`.
+    """
     specs = tool_specs()
     max_iterations = 6  # bound on tool/model round-trips
+    last_message_id: str | None = None
 
     try:
         for _ in range(max_iterations):
@@ -393,7 +404,7 @@ async def _stream_live(session_id: str, request: Request):
             text = "".join(text_buf)
 
             # Persist this assistant turn
-            mid = await _append_message(
+            last_message_id = await _append_message(
                 session_id, "assistant", text,
                 tool_calls=tool_calls_accum or None,
             )
@@ -429,20 +440,25 @@ async def _stream_live(session_id: str, request: Request):
                     )
                 continue  # loop back into the model
 
-            yield {"event": "done", "data": json.dumps({"message_id": mid})}
+            yield {"event": "done", "data": json.dumps({"message_id": last_message_id})}
             return
 
+        # Hit the iteration cap without a natural exit. Surface it as an
+        # error, then still emit `done` so the browser leaves "thinking".
         yield {
             "event": "error",
             "data": json.dumps({"message": "max tool-call iterations reached"}),
         }
+        yield {"event": "done", "data": json.dumps({"message_id": last_message_id})}
 
     except LLMError as e:
         log.warning("live chat LLM error: %s", e)
         yield {"event": "error", "data": json.dumps({"message": str(e)})}
+        yield {"event": "done", "data": json.dumps({"message_id": last_message_id})}
     except Exception as e:  # noqa: BLE001
         log.exception("live chat crashed")
         yield {"event": "error", "data": json.dumps({"message": f"{type(e).__name__}: {e}"})}
+        yield {"event": "done", "data": json.dumps({"message_id": last_message_id})}
 
 
 async def _stream_build(session_id: str, user_message: str, request: Request):
@@ -505,6 +521,7 @@ async def _stream_build(session_id: str, user_message: str, request: Request):
 
             elif etype == "error":
                 yield {"event": "error", "data": json.dumps({"message": evt.get("message", "")})}
+                yield {"event": "done", "data": json.dumps({"message_id": None})}
                 return
 
         # Stream ended without an explicit done event — persist whatever we got.
@@ -518,7 +535,9 @@ async def _stream_build(session_id: str, user_message: str, request: Request):
             yield {"event": "done", "data": json.dumps({"message_id": mid})}
         else:
             yield {"event": "error", "data": json.dumps({"message": "claude produced no output"})}
+            yield {"event": "done", "data": json.dumps({"message_id": None})}
 
     except Exception as e:  # noqa: BLE001
         log.exception("build chat crashed")
         yield {"event": "error", "data": json.dumps({"message": f"{type(e).__name__}: {e}"})}
+        yield {"event": "done", "data": json.dumps({"message_id": None})}

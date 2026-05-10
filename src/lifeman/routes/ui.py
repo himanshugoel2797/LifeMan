@@ -237,13 +237,15 @@ async def audit_page(request: Request):
 
 
 @router.get("/events")
-async def sse_events(request: Request):
+async def sse_events(request: Request, since_seq: int | None = None):
+    """SSE stream. Pass `?since_seq=N` to replay events newer than N from the
+    bus's in-memory ring buffer."""
     async def event_generator():
-        async for msg in bus.subscribe():
+        async for msg in bus.subscribe(since_seq=since_seq):
             if await request.is_disconnected():
                 break
             yield {
                 "event": msg["event"],
-                "data": json.dumps(msg["data"]),
+                "data": json.dumps({**msg["data"], "_seq": msg.get("seq")}),
             }
     return EventSourceResponse(event_generator())

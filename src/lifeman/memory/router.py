@@ -4,8 +4,12 @@ Default policy:
     type_hint == "summary"           → memory_store (always keep summaries)
     type_hint in {episodic, semantic, identity} → memory_store
     content is too short (< 8 chars) → discard
-    sensitivity == "private" but no tags → discard
+    sensitivity == "private" without tags → memory_store with `needs_review`
     otherwise                        → memory_store
+
+Note: an earlier version dropped private+untagged events on the floor, but
+that left tool authors with no signal that their memory disappeared. Now we
+store the event with a `needs_review` tag so the user can audit it.
 """
 
 from __future__ import annotations
@@ -32,9 +36,11 @@ async def builtin_route(
         notes = "content too short to be memory-worthy"
         decision.matched_rules = [10]
     elif event.sensitivity == "private" and not event.tags:
-        pick = "discard"
-        notes = "private without tags — declining to store"
+        pick = "memory_store"
+        notes = "private without tags — flagged needs_review"
         decision.matched_rules = [20]
+        # Mutate the event in place so the writer persists the review tag.
+        event.tags = list(event.tags) + ["needs_review"]
     elif event.type_hint in (None, "", "episodic", "semantic", "identity", "summary"):
         pick = "memory_store"
         decision.matched_rules = [30]
