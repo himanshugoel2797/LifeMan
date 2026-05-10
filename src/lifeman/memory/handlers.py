@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from lifeman.db import get_db
 from lifeman.routing.event import HandlerManifest
-from lifeman.routing.handlers import BuiltinHandler, HandlerRegistry
+from lifeman.routing.handlers import BuiltinHandler, HandlerRegistry, make_discard_handler
 
 log = logging.getLogger("lifeman.memory.handlers")
 
@@ -43,11 +43,6 @@ async def _store(event: dict) -> dict:
     return {"ok": True, "delivery_id": mem_id}
 
 
-async def _discard(event: dict) -> dict:
-    log.info("memory candidate %s discarded", event.get("event_id"))
-    return {"ok": True, "delivery_id": event.get("event_id")}
-
-
 def install_builtin_handlers() -> None:
     registry.register(BuiltinHandler(
         manifest=HandlerManifest(
@@ -56,11 +51,5 @@ def install_builtin_handlers() -> None:
         ),
         methods={"store": _store},
     ))
-    registry.register(BuiltinHandler(
-        manifest=HandlerManifest(
-            name="discard", handler_type="noop",
-            sensitivity_tolerance="private",
-        ),
-        methods={"store": _discard},
-    ))
+    registry.register(make_discard_handler("memory"))
     log.info("installed built-in memory handlers: memory_store, discard")

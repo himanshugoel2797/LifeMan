@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from lifeman.db import get_db
 from lifeman.routing.event import HandlerManifest
-from lifeman.routing.handlers import BuiltinHandler, HandlerRegistry
+from lifeman.routing.handlers import BuiltinHandler, HandlerRegistry, make_discard_handler
 
 log = logging.getLogger("lifeman.inputs.handlers")
 
@@ -94,11 +94,6 @@ async def _direct_invoke_handle(event: dict) -> dict:
     return {"ok": True, "delivery_id": inv_id, "result": result}
 
 
-async def _discard_handle(event: dict) -> dict:
-    log.info("input %s discarded by router", event.get("event_id"))
-    return {"ok": True, "delivery_id": event.get("event_id")}
-
-
 def install_builtin_handlers() -> None:
     registry.register(BuiltinHandler(
         manifest=HandlerManifest(
@@ -114,11 +109,5 @@ def install_builtin_handlers() -> None:
         ),
         methods={"handle": _direct_invoke_handle},
     ))
-    registry.register(BuiltinHandler(
-        manifest=HandlerManifest(
-            name="discard", handler_type="noop",
-            sensitivity_tolerance="private",
-        ),
-        methods={"handle": _discard_handle},
-    ))
+    registry.register(make_discard_handler("inputs"))
     log.info("installed built-in input handlers: llm, direct_invoke, discard")

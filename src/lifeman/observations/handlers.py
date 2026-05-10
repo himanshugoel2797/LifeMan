@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from lifeman.db import get_db
 from lifeman.routing.event import HandlerManifest
-from lifeman.routing.handlers import BuiltinHandler, HandlerRegistry
+from lifeman.routing.handlers import BuiltinHandler, HandlerRegistry, make_discard_handler
 
 log = logging.getLogger("lifeman.observations.handlers")
 
@@ -43,10 +43,6 @@ async def _archive(event: dict) -> dict:
     )
     await db.commit()
     return {"ok": True, "delivery_id": obs_id}
-
-
-async def _discard(event: dict) -> dict:
-    return {"ok": True, "delivery_id": event.get("event_id")}
 
 
 async def _summarize(event: dict) -> dict:
@@ -79,13 +75,7 @@ def install_builtin_handlers() -> None:
         ),
         methods={"archive": _archive},
     ))
-    registry.register(BuiltinHandler(
-        manifest=HandlerManifest(
-            name="discard", handler_type="noop",
-            sensitivity_tolerance="private",
-        ),
-        methods={"archive": _discard},
-    ))
+    registry.register(make_discard_handler("observations"))
     registry.register(BuiltinHandler(
         manifest=HandlerManifest(
             name="summarize", handler_type="accumulator",

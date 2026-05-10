@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from pydantic import BaseModel, Field
+
+
+def is_expired(expires_at: str | None) -> bool:
+    """True if the ISO-8601 timestamp is in the past. Unparseable / missing → False."""
+    if not expires_at:
+        return False
+    try:
+        deadline = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) >= deadline
 
 
 class RoutedEvent(BaseModel):

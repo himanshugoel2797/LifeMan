@@ -80,3 +80,26 @@ class HandlerRegistry:
 
     def names(self) -> list[str]:
         return list(self._handlers.keys())
+
+
+def make_discard_handler(domain: str) -> BuiltinHandler:
+    """Standard no-op handler used by every domain when the router decides
+    an event isn't worth keeping. Logs at info and returns ok with the
+    event_id as the delivery_id.
+
+    `domain` selects the method name the engine will dispatch to (inputs use
+    `handle`, memory uses `store`, observations use `archive`).
+    """
+    method_name = {"inputs": "handle", "memory": "store", "observations": "archive"}[domain]
+    domain_log = logging.getLogger(f"lifeman.{domain}.handlers")
+
+    async def _discard(event: dict) -> dict:
+        domain_log.info("%s event %s discarded", domain, event.get("event_id"))
+        return {"ok": True, "delivery_id": event.get("event_id")}
+
+    return BuiltinHandler(
+        manifest=HandlerManifest(
+            name="discard", handler_type="noop", sensitivity_tolerance="private",
+        ),
+        methods={method_name: _discard},
+    )

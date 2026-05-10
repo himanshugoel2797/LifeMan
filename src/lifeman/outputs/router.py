@@ -28,6 +28,7 @@ from lifeman.outputs.models import (
     RuleMatch,
 )
 from lifeman.outputs.registry import registry
+from lifeman.routing.event import is_expired
 
 log = logging.getLogger("lifeman.outputs.router")
 
@@ -181,18 +182,6 @@ def _match_rule(rule: RoutingRule, event: OutputEvent, state: dict) -> bool:
     return True
 
 
-async def _expired(event: OutputEvent) -> bool:
-    if not event.expires_at:
-        return False
-    try:
-        deadline = datetime.fromisoformat(event.expires_at.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if deadline.tzinfo is None:
-        deadline = deadline.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) >= deadline
-
-
 # ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
@@ -207,7 +196,7 @@ async def route(event: OutputEvent, *, user_state: dict | None = None) -> Routin
     state = user_state or {}
     decision = RoutingDecision(output_id=event.output_id)
 
-    if await _expired(event):
+    if is_expired(event.expires_at):
         decision.expired = True
         decision.notes = "event expired before routing"
         return decision

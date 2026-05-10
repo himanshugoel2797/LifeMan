@@ -10,29 +10,15 @@ Default policy:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from lifeman.memory.models import MemoryEvent
-from lifeman.routing.event import HandlerManifest, RoutingDecision
-
-
-def _expired(event: MemoryEvent) -> bool:
-    if not event.expires_at:
-        return False
-    try:
-        deadline = datetime.fromisoformat(event.expires_at.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if deadline.tzinfo is None:
-        deadline = deadline.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) >= deadline
+from lifeman.routing.event import HandlerManifest, RoutingDecision, is_expired
 
 
 async def builtin_route(
     event: MemoryEvent, state: dict, handlers: list[HandlerManifest],
 ) -> RoutingDecision:
     decision = RoutingDecision(event_id=event.event_id)
-    if _expired(event):
+    if is_expired(event.expires_at):
         decision.expired = True
         decision.notes = "expired before classification"
         return decision
