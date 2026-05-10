@@ -7,7 +7,8 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from lifeman.config import settings
@@ -25,6 +26,10 @@ log = logging.getLogger("lifeman")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    # Belt-and-suspenders for the cli() loopback check: if the app is started
+    # via `uvicorn lifeman.main:app --host 0.0.0.0` instead of the packaged
+    # entry point, refuse early so the UI never gets exposed to the network.
+    _enforce_loopback_only(settings.host)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.get_tools_dir().mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +73,26 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def _refuse_non_loopback_clients(request: Request, call_next):
+    """Reject any request whose client is not the loopback interface.
+
+    Defence in depth: even if the bind check above were bypassed (a future
+    entry point, a misconfigured reverse proxy that forwards directly without
+    rewriting the peer), refuse to serve at the request layer too. The UI is
+    unauthenticated and templates the bearer token into every page; serving
+    it over a network would leak it.
+    """
+    client = request.client
+    if client is not None and client.host not in _LOOPBACK_HOSTS:
+        return JSONResponse(
+            {"error": "non-loopback access denied"},
+            status_code=403,
+        )
+    return await call_next(request)
+
 
 # Mount static files
 static_dir = Path(__file__).parent / "static"
