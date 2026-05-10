@@ -4,6 +4,7 @@ POST   /api/outputs                  emit a structured output event
 POST   /api/outputs/{id}/cancel      recall a previously-emitted event
 POST   /api/outputs/{id}/respond     channel-side: report a user response
 GET    /api/outputs                  list recent events (newest first)
+GET    /api/outputs/pending          deliveries-for-the-caller catch-up
 GET    /api/outputs/{id}             one event with delivery + audit detail
 GET    /api/outputs/channels         list installed channels with manifests
 GET    /api/outputs/rules            list current routing rules
@@ -19,7 +20,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from lifeman.auth import require_auth
+from lifeman.auth import Principal, require_auth
 from lifeman.db import get_db
 from lifeman.models import OkResponse
 from lifeman.outputs import api as outputs_api
@@ -209,6 +210,78 @@ async def dismiss_rule_proposal(proposal_id: int, _: str = Depends(require_auth)
     )
     await db.commit()
     return OkResponse()
+
+
+@router.get("/pending")
+async def list_pending_for_caller(
+    since: str | None = None,
+    limit: int = 100,
+    principal: Principal = Depends(require_auth),
+):
+    """Return deliveries the caller missed while disconnected.
+
+    A device that drops its SSE connection (cellular handoff, battery
+    optimiser, app suspend) needs a way to reconcile on reconnect. The
+    SSE replay buffer is bounded and in-memory, so anything older than
+    a few hundred events is gone. This endpoint reads the durable
+    ``output_deliveries`` table for the caller's device and returns the
+    same payload shape the missed SSE event would have carried, ordered
+    oldest-first so the client can render in arrival order.
+
+    The master (loopback) caller can pass ``?device_id=...`` via no
+    extra param — instead it sees its own master-targeted deliveries.
+    For Phase 1 we only support the device case; the loopback UI uses
+    the SSE bus directly and doesn't need this endpoint.
+    """
+    if principal.kind != "device":
+        # Master/loopback isn't the use case here. Returning an empty
+        # list rather than 4xx so a curious browser hitting this URL
+        # doesn't see a confusing error.
+        return {"events": [], "cursor": since}
+
+    channel_name = f"device:{principal.device_id}"
+    db = await get_db()
+    if since:
+        rows = await db.execute_fetchall(
+            "SELECT d.id, d.output_id, d.delivery_id, d.delivered_at, d.cancelled_at, "
+            "       d.status, e.category, e.urgency, e.content_json, e.actions_json, "
+            "       e.source_tool, e.expires_at "
+            "  FROM output_deliveries d "
+            "  JOIN output_events e ON e.id = d.output_id "
+            " WHERE d.channel = ? AND d.delivered = 1 AND d.delivered_at > ? "
+            " ORDER BY d.delivered_at ASC LIMIT ?",
+            (channel_name, since, limit),
+        )
+    else:
+        rows = await db.execute_fetchall(
+            "SELECT d.id, d.output_id, d.delivery_id, d.delivered_at, d.cancelled_at, "
+            "       d.status, e.category, e.urgency, e.content_json, e.actions_json, "
+            "       e.source_tool, e.expires_at "
+            "  FROM output_deliveries d "
+            "  JOIN output_events e ON e.id = d.output_id "
+            " WHERE d.channel = ? AND d.delivered = 1 "
+            " ORDER BY d.delivered_at ASC LIMIT ?",
+            (channel_name, limit),
+        )
+    events: list[dict] = []
+    cursor = since
+    for r in rows:
+        events.append({
+            "output_id": r["output_id"],
+            "delivery_id": r["delivery_id"],
+            "device_id": principal.device_id,
+            "category": r["category"],
+            "urgency": r["urgency"],
+            "content": json.loads(r["content_json"]),
+            "actions": json.loads(r["actions_json"]),
+            "source_tool": r["source_tool"],
+            "expires_at": r["expires_at"],
+            "delivered_at": r["delivered_at"],
+            "cancelled_at": r["cancelled_at"],
+            "status": r["status"],
+        })
+        cursor = r["delivered_at"]
+    return {"events": events, "cursor": cursor}
 
 
 @router.get("/{output_id}")

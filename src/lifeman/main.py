@@ -37,10 +37,12 @@ async def lifespan(app: FastAPI):
     log.info("Database ready at %s", settings.get_db_path())
 
     from lifeman.outputs.registry import install_builtin_channels
+    from lifeman.outputs.channels.devices import install_device_channels
     from lifeman.inputs import install_handlers as install_input_handlers
     from lifeman.memory import install_handlers as install_memory_handlers
     from lifeman.observations import install_handlers as install_observation_handlers
     install_builtin_channels()
+    await install_device_channels()
     install_input_handlers()
     install_memory_handlers()
     install_observation_handlers()

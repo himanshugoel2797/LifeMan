@@ -29,3 +29,32 @@ class IngestInputResponse(BaseModel):
     dispatched: list[str] = Field(default_factory=list)
     dropped: list[str] = Field(default_factory=list)
     expired: bool = False
+
+
+class IngestBatchRequest(BaseModel):
+    """A bag of input events from one client.
+
+    Used by device clients (CLIENT_DESIGN.MD) to amortise HTTP overhead
+    when their outbox has accumulated multiple observations — sensors,
+    foreground-app changes, notification fan-out — between uploads.
+    Each event is processed independently; partial failures are reported
+    per-event in the response.
+    """
+    events: list[IngestInputRequest] = Field(default_factory=list)
+
+
+class IngestBatchItemResult(BaseModel):
+    """Per-event result inside a batch response.
+
+    ``ok=True`` and ``response`` set means the event was ingested; the
+    embedded ``IngestInputResponse`` has the dispatch/dropped detail.
+    ``ok=False`` and ``error`` set means this single event failed; the
+    rest of the batch was still attempted.
+    """
+    ok: bool
+    response: IngestInputResponse | None = None
+    error: str | None = None
+
+
+class IngestBatchResponse(BaseModel):
+    results: list[IngestBatchItemResult]

@@ -1,8 +1,9 @@
 """HTTP routes for input routing.
 
-POST   /api/inputs        ingest an input event
-GET    /api/inputs        list recent input events
-GET    /api/inputs/{id}   one event with audit + dispatches
+POST   /api/inputs         ingest an input event
+POST   /api/inputs/batch   ingest a batch of input events (per-event status)
+GET    /api/inputs         list recent input events
+GET    /api/inputs/{id}    one event with audit + dispatches
 """
 
 from __future__ import annotations
@@ -14,7 +15,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from lifeman.auth import require_auth
 from lifeman.db import get_db
 from lifeman.inputs import ingest_input
-from lifeman.inputs.models import IngestInputRequest, IngestInputResponse
+from lifeman.inputs.models import (
+    IngestBatchItemResult,
+    IngestBatchRequest,
+    IngestBatchResponse,
+    IngestInputRequest,
+    IngestInputResponse,
+)
 from lifeman.routes._audit import load_audit_and_dispatches
 
 router = APIRouter()
@@ -32,6 +39,46 @@ async def post_input(body: IngestInputRequest, _: str = Depends(require_auth)):
         context=body.context,
         reason=body.reason,
     )
+
+
+# Hard cap on batch size — guards against a wedged client that uploads
+# its entire outbox in one shot. Batches over the cap return 413; the
+# client splits and retries. Sized so a high-cadence sensor collector
+# (CLIENT_DESIGN.MD §"phone.sensor.<name>") can drain a few minutes of
+# downsampled events per request without abusing the kernel.
+_MAX_BATCH_SIZE = 200
+
+
+@router.post("/batch", response_model=IngestBatchResponse)
+async def post_inputs_batch(body: IngestBatchRequest, _: str = Depends(require_auth)):
+    """Ingest a batch of input events with per-event status.
+
+    Each event is routed independently — a malformed entry doesn't
+    poison the batch. The response preserves request order so a client
+    can correlate by index without a per-event id round-trip.
+    """
+    if len(body.events) > _MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"batch exceeds {_MAX_BATCH_SIZE} events; split and retry",
+        )
+    results: list[IngestBatchItemResult] = []
+    for ev in body.events:
+        try:
+            resp = await ingest_input(
+                surface=ev.surface,
+                raw_payload=ev.raw_payload,
+                intent_hint=ev.intent_hint,
+                source=ev.source or "user",
+                sensitivity=ev.sensitivity,
+                expires_at=ev.expires_at,
+                context=ev.context,
+                reason=ev.reason,
+            )
+            results.append(IngestBatchItemResult(ok=True, response=resp))
+        except Exception as e:  # noqa: BLE001
+            results.append(IngestBatchItemResult(ok=False, error=f"{type(e).__name__}: {e}"))
+    return IngestBatchResponse(results=results)
 
 
 @router.get("")

@@ -9,6 +9,12 @@ subscribe/unsubscribe during publish doesn't raise.
 A small ring buffer keeps the most recent events so a freshly-connected
 client (or one that missed events) can replay rather than refresh the
 whole page.
+
+Each event optionally carries a ``target`` audience tag. ``None`` is a
+broadcast (every subscriber sees it); a string like ``"device:abc"``
+restricts delivery to subscribers whose principal matches. This is what
+lets the per-device output channel push notifications to one phone over
+the shared SSE stream without leaking to every connected browser.
 """
 
 from __future__ import annotations
@@ -30,12 +36,34 @@ _QUEUE_DEPTH = 256
 
 
 class _Subscriber:
-    __slots__ = ("queue", "dropped", "id")
+    __slots__ = ("queue", "dropped", "id", "audience")
 
-    def __init__(self, sid: int) -> None:
+    def __init__(self, sid: int, audience: str | None) -> None:
         self.queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=_QUEUE_DEPTH)
         self.dropped: int = 0
         self.id = sid
+        # Audience tag the subscriber will accept targeted events under.
+        # Master subscribers pass ``"master"`` and additionally see every
+        # targeted event (loopback is the trusted superuser); device
+        # subscribers pass ``"device:<id>"`` and only see broadcasts plus
+        # their own targeted events.
+        self.audience = audience
+
+
+def _matches(sub_audience: str | None, msg_target: str | None) -> bool:
+    """Whether this subscriber should receive this message.
+
+    ``msg_target=None`` is a broadcast — everyone gets it. A targeted
+    message reaches only the subscriber whose audience matches exactly,
+    plus any ``master`` subscriber (the loopback UI sees everything).
+    """
+    if msg_target is None:
+        return True
+    if sub_audience is None:
+        return False
+    if sub_audience == "master":
+        return True
+    return sub_audience == msg_target
 
 
 class EventBus:
@@ -48,14 +76,22 @@ class EventBus:
         self._replay: deque[tuple[int, dict]] = deque(maxlen=_REPLAY_CAPACITY)
         self._seq = 0
 
-    async def publish(self, event_type: str, data: dict) -> None:
-        msg = {"event": event_type, "data": data, "ts": time.time()}
+    async def publish(
+        self,
+        event_type: str,
+        data: dict,
+        *,
+        target: str | None = None,
+    ) -> None:
+        msg = {"event": event_type, "data": data, "ts": time.time(), "target": target}
         async with self._lock:
             self._seq += 1
             seq = self._seq
             self._replay.append((seq, msg))
             subs = list(self._subscribers)
         for sub in subs:
+            if not _matches(sub.audience, target):
+                continue
             try:
                 sub.queue.put_nowait({**msg, "seq": seq})
             except asyncio.QueueFull:
@@ -65,14 +101,20 @@ class EventBus:
                     sub.id, sub.dropped,
                 )
 
-    async def subscribe(self, since_seq: int | None = None) -> AsyncGenerator[dict, None]:
-        sub = _Subscriber(self._next_id)
+    async def subscribe(
+        self,
+        since_seq: int | None = None,
+        *,
+        audience: str | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        sub = _Subscriber(self._next_id, audience)
         async with self._lock:
             self._next_id += 1
             self._subscribers.append(sub)
             replay = [
                 {**m, "seq": s} for s, m in self._replay
-                if since_seq is None or s > since_seq
+                if (since_seq is None or s > since_seq)
+                and _matches(audience, m.get("target"))
             ]
             sync_seq = self._seq
         try:

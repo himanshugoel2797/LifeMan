@@ -148,6 +148,8 @@
         Enter this on the new device. Once consumed, the device receives a
         long-lived token; this code stops working immediately.
     </p>
+    <p style="margin: 8px 0 4px;"><strong>Pair URL</strong> (the client can scan/open this directly):</p>
+    <code id="device-pair-url" style="font-size: 13px; word-break: break-all;"></code>
 </div>
 
 {% if devices %}
@@ -198,6 +200,12 @@ document.getElementById('device-pair-btn').addEventListener('click', async () =>
         }
         const body = await r.json();
         document.getElementById('device-pair-code-value').textContent = body.code;
+        // The lifeman://pair URL the client can scan or be deep-linked
+        // with — same shape as CLIENT_DESIGN.MD §"Provisioning flow".
+        const host = window.location.host;
+        const url = 'lifeman://pair?host=' + encodeURIComponent('http://' + host)
+                    + '&code=' + encodeURIComponent(body.code);
+        document.getElementById('device-pair-url').textContent = url;
         document.getElementById('device-pair-code').style.display = 'block';
     } finally {
         btn.disabled = false;

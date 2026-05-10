@@ -606,8 +606,15 @@ async def sse_events(
     principal = await resolve_query_token(request, supplied)
     if principal is None:
         raise HTTPException(status_code=401, detail="Invalid or missing token")
+    # Audience tag governs which targeted events this subscriber sees.
+    # Master (loopback) sees everything for transparency; a device only
+    # sees broadcasts plus events targeted to its own channel name.
+    audience = (
+        "master" if principal.kind == "master"
+        else f"device:{principal.device_id}"
+    )
     async def event_generator():
-        async for msg in bus.subscribe(since_seq=since_seq):
+        async for msg in bus.subscribe(since_seq=since_seq, audience=audience):
             if await request.is_disconnected():
                 break
             yield {

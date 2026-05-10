@@ -182,6 +182,14 @@ async def consume_pairing_code(
         ),
     )
     await db.commit()
+
+    # Register the device's output channel so the router can dispatch
+    # to it without a kernel restart. Imported lazily to keep the module
+    # import-clean (devices.py is loaded by auth.py during request auth,
+    # before the outputs subsystem is necessarily ready).
+    from lifeman.outputs.channels.devices import register_device_channel
+    register_device_channel(device_id, name, capabilities or {})
+
     return IssuedDeviceToken(
         device_id=device_id,
         name=name,
@@ -287,4 +295,10 @@ async def revoke_device(device_id: str) -> bool:
         (_now(), device_id),
     )
     await db.commit()
-    return (cur.rowcount or 0) > 0
+    if (cur.rowcount or 0) > 0:
+        # Drop the output channel so the router stops dispatching to a
+        # device whose token will now bounce off auth.
+        from lifeman.outputs.channels.devices import unregister_device_channel
+        unregister_device_channel(device_id)
+        return True
+    return False
