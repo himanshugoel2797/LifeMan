@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import dedent
 from typing import AsyncIterator
-from uuid import uuid4
 
 from lifeman.config import settings
 from lifeman.db import get_db
@@ -273,9 +272,13 @@ async def stream_build_turn(
     except Exception:
         log.exception("failed to refresh CLAUDE.md")
 
-    # Decide session id: reuse if we have one, else create a fresh uuid for first turn
+    # On the first turn, let Claude pick its own session id. We learn the id
+    # from the `system` init event in the stream and yield it back to the
+    # caller (which persists it for subsequent --resume calls). Pre-generating
+    # the id and forcing it via --session-id risked silently joining another
+    # process's session if a uuid ever collided or the CLI rejected pre-set
+    # ids; reading the canonical id from Claude's own output sidesteps that.
     is_first = external_id is None
-    claude_session_id = external_id or str(uuid4())
 
     args: list[str] = [
         cli,
@@ -284,13 +287,15 @@ async def stream_build_turn(
         "--verbose",
         "--append-system-prompt", BUILD_SYSTEM_PROMPT,
     ]
-    if is_first:
-        args += ["--session-id", claude_session_id]
-    else:
-        args += ["--resume", claude_session_id]
+    if not is_first:
+        args += ["--resume", external_id]
     args += [user_message]
 
-    log.info("build_chat: spawning claude (session=%s, first=%s, cwd=%s)", claude_session_id, is_first, workspace)
+    log.info(
+        "build_chat: spawning claude (resume=%s, cwd=%s)",
+        external_id if not is_first else None,
+        workspace,
+    )
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -303,10 +308,10 @@ async def stream_build_turn(
         yield {"type": "error", "message": f"failed to spawn claude: {e}"}
         return
 
-    if is_first:
-        yield {"type": "external_id", "value": claude_session_id}
-
-    # Stream stdout line by line and parse JSON events.
+    # Stream stdout line by line and parse JSON events. The first `system`
+    # event carries the canonical session_id; on the first turn we forward it
+    # as an `external_id` event so the caller can persist it for resume.
+    seen_session_id: str | None = None
     assert proc.stdout is not None
     async for raw in proc.stdout:
         line = raw.decode(errors="replace").strip()
@@ -317,6 +322,17 @@ async def stream_build_turn(
         except json.JSONDecodeError:
             log.debug("build_chat: non-JSON line: %s", line[:200])
             continue
+
+        # Forward the session id from Claude's init metadata. We trust whatever
+        # the CLI tells us — if it differs from the id we passed via --resume,
+        # treat the new one as authoritative (the CLI may have created a new
+        # session under us if resume failed).
+        sid = evt.get("session_id")
+        if isinstance(sid, str) and sid and sid != seen_session_id:
+            seen_session_id = sid
+            if sid != external_id:
+                yield {"type": "external_id", "value": sid}
+
         async for parsed in _parse_event(evt):
             yield parsed
 
