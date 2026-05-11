@@ -146,45 +146,63 @@ async def _fire(schedule: dict) -> None:
     fire_id = str(uuid.uuid4())[:12]
 
     log.info("Firing schedule %s (fire %s) for tool %s", schedule_id, fire_id, tool_name)
-    await audit.log(
-        source="scheduler",
-        action="fire_schedule",
-        target=tool_name,
-        args_summary=json.dumps(args)[:200],
-        reason=schedule["reason"],
-    )
-    await bus.publish("schedule_fired", {"id": schedule_id, "tool": tool_name, "fire_id": fire_id})
 
-    # Execute the tool
-    _, result = await _execute_tool(
-        tool_name, args, source="schedule", schedule_id=schedule_id, fire_id=fire_id,
-    )
-
-    # Update schedule state
-    total = schedule["total_fires"] + 1
-    no_ops = 0  # Reset on fire; tools can signal no-op via result
-    if isinstance(result, dict) and result.get("no_op"):
-        no_ops = schedule["consecutive_no_ops"] + 1
-
-    if next_fire:
-        # Recurring: lock in the previously-reserved next_fire as authoritative.
-        await db.execute(
-            """UPDATE schedules
-               SET last_fired = ?, fires_at = ?, total_fires = ?,
-                   consecutive_no_ops = ?, last_started_at = NULL
-               WHERE id = ?""",
-            (datetime.now(timezone.utc).isoformat(), next_fire, total, no_ops, schedule_id),
+    # Everything after the reservation runs inside a try/finally that
+    # guarantees the schedule's terminal state is committed. Without this,
+    # any exception (audit/bus failure, DB hiccup inside _execute_tool, etc.)
+    # would leave last_started_at set and fires_at in the future — the row
+    # would sit "reserved forever" until the next process restart triggered
+    # _reconcile_crashed_fires.
+    result: dict = {"error": "scheduler crashed before producing a result"}
+    try:
+        await audit.log(
+            source="scheduler",
+            action="fire_schedule",
+            target=tool_name,
+            args_summary=json.dumps(args)[:200],
+            reason=schedule["reason"],
         )
-    else:
-        # One-shot: mark as done by setting cancelled_at
-        await db.execute(
-            """UPDATE schedules
-               SET last_fired = ?, total_fires = ?, cancelled_at = ?,
-                   last_started_at = NULL
-               WHERE id = ?""",
-            (datetime.now(timezone.utc).isoformat(), total, datetime.now(timezone.utc).isoformat(), schedule_id),
+        await bus.publish(
+            "schedule_fired",
+            {"id": schedule_id, "tool": tool_name, "fire_id": fire_id},
         )
-    await db.commit()
+        try:
+            _, result = await _execute_tool(
+                tool_name, args, source="schedule",
+                schedule_id=schedule_id, fire_id=fire_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception(
+                "scheduler: _execute_tool raised for schedule %s (fire %s)",
+                schedule_id, fire_id,
+            )
+            result = {"error": f"{type(e).__name__}: {e}"}
+    finally:
+        total = schedule["total_fires"] + 1
+        no_ops = 0  # Reset on fire; tools can signal no-op via result
+        if isinstance(result, dict) and result.get("no_op"):
+            no_ops = schedule["consecutive_no_ops"] + 1
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if next_fire:
+            # Recurring: lock in the previously-reserved next_fire.
+            await db.execute(
+                """UPDATE schedules
+                   SET last_fired = ?, fires_at = ?, total_fires = ?,
+                       consecutive_no_ops = ?, last_started_at = NULL
+                   WHERE id = ?""",
+                (now_iso, next_fire, total, no_ops, schedule_id),
+            )
+        else:
+            # One-shot: mark as done by setting cancelled_at
+            await db.execute(
+                """UPDATE schedules
+                   SET last_fired = ?, total_fires = ?, cancelled_at = ?,
+                       last_started_at = NULL
+                   WHERE id = ?""",
+                (now_iso, total, now_iso, schedule_id),
+            )
+        await db.commit()
 
 
 def _compute_next_fire(when_spec: str) -> str | None:

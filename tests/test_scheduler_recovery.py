@@ -246,3 +246,62 @@ async def test_tool_outruns_tick_interval_no_double_fire(temp_db, monkeypatch):
     ))[0])
     assert row["total_fires"] == 1
     assert row["last_started_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_raises_still_finalizes_schedule(temp_db, monkeypatch):
+    """If _execute_tool raises mid-fire, the schedule's reservation must
+    still be released — otherwise the row sits with last_started_at set
+    and fires_at in the future forever (until next process restart).
+
+    Regression for the silent-stuck-schedule case: the try/finally in
+    _fire guarantees state finalization even when the tool layer
+    itself blows up.
+    """
+    async def boom(tool, args, **kw):
+        raise RuntimeError("synthetic DB outage")
+
+    import lifeman.routes.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_execute_tool", boom)
+
+    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    sid = await _insert_schedule(
+        temp_db, tool="t", fires_at=past,
+        when_spec=json.dumps({"recur": "daily", "at": "08:00"}),
+    )
+
+    # Must not raise even though the tool layer did.
+    await scheduler._tick()
+
+    row = dict((await temp_db.execute_fetchall(
+        "SELECT last_started_at, total_fires, fires_at, cancelled_at "
+        "FROM schedules WHERE id = ?", (sid,),
+    ))[0])
+    # The reservation is released and the recurrence advanced to the next
+    # legitimate occurrence — the row is NOT stuck.
+    assert row["last_started_at"] is None
+    assert row["total_fires"] == 1
+    assert row["cancelled_at"] is None
+    assert datetime.fromisoformat(row["fires_at"]) > datetime.now(timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_one_shot_finalizes_even_when_tool_raises(temp_db, monkeypatch):
+    """One-shot variant of the above: a crashing tool must still flip the
+    one-shot row to cancelled so it doesn't sit reserved for an hour."""
+    async def boom(tool, args, **kw):
+        raise RuntimeError("synthetic crash")
+
+    import lifeman.routes.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_execute_tool", boom)
+
+    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    sid = await _insert_schedule(temp_db, tool="t", fires_at=past)
+
+    await scheduler._tick()
+
+    row = dict((await temp_db.execute_fetchall(
+        "SELECT last_started_at, cancelled_at FROM schedules WHERE id = ?", (sid,),
+    ))[0])
+    assert row["last_started_at"] is None
+    assert row["cancelled_at"] is not None

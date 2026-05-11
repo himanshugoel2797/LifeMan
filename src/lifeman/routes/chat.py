@@ -432,20 +432,39 @@ async def _load_history_for_llm(session_id: str) -> list[dict]:
     return out
 
 
-async def _stream_live(session_id: str, request: Request):
-    """Run the live-chat loop: model -> tool calls -> model, streaming as we go.
+async def stream_chat_turns(
+    session_id: str,
+    *,
+    is_disconnected=None,
+):
+    """Run the live-chat model+tool loop as a transport-neutral generator.
 
-    Always finishes with a `done` event so browser clients can flip out of
-    the "thinking" state regardless of the exit reason. Errors are reported
-    via an `error` event *followed* by `done`.
+    Yields one structured turn event at a time. Callers translate to whatever
+    wire format they need (SSE for the HTTP route, internal bus for the input
+    handler). Always finishes with a ``done`` event so consumers can flip out
+    of "thinking" state regardless of exit reason; errors emit ``error`` then
+    ``done``.
+
+    Event shapes:
+      {"type": "delta", "text": str}
+      {"type": "tool_call", "name": str, "args": dict | str}
+      {"type": "tool_result", "name": str, "ok": bool, "result": dict}
+      {"type": "error", "message": str}
+      {"type": "done", "message_id": str | None}
+
+    Pass ``is_disconnected`` (an async callable returning bool) when the
+    consumer has a way to detect a dropped client — the generator stops
+    cleanly between iterations rather than wasting a model turn.
     """
+    import time as _time
+
     specs = tool_specs()
     max_iterations = 6  # bound on tool/model round-trips
     last_message_id: str | None = None
 
     try:
         for _ in range(max_iterations):
-            if await request.is_disconnected():
+            if is_disconnected is not None and await is_disconnected():
                 return
 
             messages = await _load_history_for_llm(session_id)
@@ -454,12 +473,11 @@ async def _stream_live(session_id: str, request: Request):
             finish: str | None = None
             usage: dict | None = None
 
-            import time as _time
             turn_started_ms = _time.monotonic() * 1000
             async for delta in stream_chat(messages, tools=specs):
                 if "content" in delta and delta["content"]:
                     text_buf.append(delta["content"])
-                    yield {"event": "delta", "data": json.dumps({"text": delta["content"]})}
+                    yield {"type": "delta", "text": delta["content"]}
                 if "tool_calls" in delta and delta["tool_calls"]:
                     merge_tool_call_deltas(tool_calls_accum, delta["tool_calls"])
                 if "finish_reason" in delta:
@@ -473,14 +491,12 @@ async def _stream_live(session_id: str, request: Request):
             )
             text = "".join(text_buf)
 
-            # Persist this assistant turn
             last_message_id = await _append_message(
                 session_id, "assistant", text,
                 tool_calls=tool_calls_accum or None,
             )
 
             if finish == "tool_calls" or tool_calls_accum:
-                # Run each tool call, persist result as a tool message, loop.
                 for call in tool_calls_accum:
                     fn = call.get("function") or {}
                     name = fn.get("name", "")
@@ -489,45 +505,62 @@ async def _stream_live(session_id: str, request: Request):
                         parsed_args = json.loads(raw_args)
                     except json.JSONDecodeError:
                         parsed_args = raw_args
-                    yield {
-                        "event": "tool_call",
-                        "data": json.dumps({"name": name, "args": parsed_args}),
-                    }
+                    yield {"type": "tool_call", "name": name, "args": parsed_args}
                     result = await dispatch_tool(name, raw_args, session_id=session_id)
                     yield {
-                        "event": "tool_result",
-                        "data": json.dumps({
-                            "name": name,
-                            "ok": "error" not in result,
-                            "summary": result,  # full object — browser formats
-                        }),
+                        "type": "tool_result",
+                        "name": name,
+                        "ok": "error" not in result,
+                        "result": result,
                     }
                     await _append_message(
-                        session_id,
-                        "tool",
-                        json.dumps(result),
+                        session_id, "tool", json.dumps(result),
                         tool_call_id=call.get("id") or name,
                     )
                 continue  # loop back into the model
 
-            yield {"event": "done", "data": json.dumps({"message_id": last_message_id})}
+            yield {"type": "done", "message_id": last_message_id}
             return
 
-        # Hit the iteration cap without a natural exit. Surface it as an
-        # error, then still emit `done` so the browser leaves "thinking".
-        yield {
-            "event": "error",
-            "data": json.dumps({"message": "max tool-call iterations reached"}),
-        }
-        yield {"event": "done", "data": json.dumps({"message_id": last_message_id})}
+        # Hit the iteration cap without a natural exit.
+        yield {"type": "error", "message": "max tool-call iterations reached"}
+        yield {"type": "done", "message_id": last_message_id}
 
     except LLMError as e:
         log.warning("live chat LLM error: %s", e)
-        yield {"event": "error", "data": json.dumps({"message": str(e)})}
-        yield {"event": "done", "data": json.dumps({"message_id": last_message_id})}
+        yield {"type": "error", "message": str(e)}
+        yield {"type": "done", "message_id": last_message_id}
     except Exception as e:  # noqa: BLE001
         log.exception("live chat crashed")
-        yield {"event": "error", "data": json.dumps({"message": f"{type(e).__name__}: {e}"})}
-        yield {"event": "done", "data": json.dumps({"message_id": last_message_id})}
+        yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
+        yield {"type": "done", "message_id": last_message_id}
+
+
+async def _stream_live(session_id: str, request: Request):
+    """SSE adapter over `stream_chat_turns` for the HTTP send-message route."""
+    async for evt in stream_chat_turns(
+        session_id, is_disconnected=request.is_disconnected,
+    ):
+        t = evt["type"]
+        if t == "delta":
+            yield {"event": "delta", "data": json.dumps({"text": evt["text"]})}
+        elif t == "tool_call":
+            yield {
+                "event": "tool_call",
+                "data": json.dumps({"name": evt["name"], "args": evt["args"]}),
+            }
+        elif t == "tool_result":
+            yield {
+                "event": "tool_result",
+                "data": json.dumps({
+                    "name": evt["name"],
+                    "ok": evt["ok"],
+                    "summary": evt["result"],  # full object — browser formats
+                }),
+            }
+        elif t == "error":
+            yield {"event": "error", "data": json.dumps({"message": evt["message"]})}
+        elif t == "done":
+            yield {"event": "done", "data": json.dumps({"message_id": evt["message_id"]})}
 
 

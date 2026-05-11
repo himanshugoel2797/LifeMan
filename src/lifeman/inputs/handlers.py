@@ -91,103 +91,39 @@ async def _llm_handle(event: dict) -> dict:
 
 
 async def _drive_background_turn(session_id: str) -> None:
-    """Run a single model turn (with tool-call loop) and publish to SSE.
+    """Run a model turn (with tool-call loop) and publish each event to the bus.
 
-    Mirrors `_stream_live` in routes/chat.py but without an HTTP request.
-    Used by the input `llm` handler so voice / watch / notification-click
-    surfaces don't sit in a write-only queue.
+    Bus adapter over `routes.chat.stream_chat_turns`. Used by the input `llm`
+    handler so voice / watch / notification-click surfaces drive a real
+    assistant turn without going through HTTP.
     """
-    # Deferred imports break a cycle: lifeman.inputs is loaded at startup,
-    # before lifeman.chat_tools / lifeman.llm are needed.
-    from lifeman.chat_tools import dispatch as dispatch_tool, tool_specs
-    from lifeman.llm import LLMError, merge_tool_call_deltas, stream_chat
-    from lifeman.routes.chat import _append_message, _load_history_for_llm
+    # Deferred import — routes.chat depends on lifeman.inputs.routing during
+    # module load via the chat tool registry, so we can only touch it once
+    # the app is up.
+    from lifeman.routes.chat import stream_chat_turns
 
-    specs = tool_specs()
-    max_iterations = 6
-    last_message_id: str | None = None
-
-    try:
-        for _ in range(max_iterations):
-            messages = await _load_history_for_llm(session_id)
-            text_buf: list[str] = []
-            tool_calls_accum: list[dict] = []
-            finish: str | None = None
-            usage: dict | None = None
-
-            import time as _time
-            turn_started_ms = _time.monotonic() * 1000
-            async for delta in stream_chat(messages, tools=specs):
-                if "content" in delta and delta["content"]:
-                    text_buf.append(delta["content"])
-                    await bus.publish("chat.delta", {
-                        "session_id": session_id,
-                        "text": delta["content"],
-                    })
-                if "tool_calls" in delta and delta["tool_calls"]:
-                    merge_tool_call_deltas(tool_calls_accum, delta["tool_calls"])
-                if "finish_reason" in delta:
-                    finish = delta["finish_reason"]
-                if "usage" in delta:
-                    usage = delta["usage"]
-
-            from lifeman.usage import record_usage
-            await record_usage(
-                usage, surface="live_chat", session_id=session_id,
-                latency_ms=int(_time.monotonic() * 1000 - turn_started_ms),
-            )
-            text = "".join(text_buf)
-            last_message_id = await _append_message(
-                session_id, "assistant", text,
-                tool_calls=tool_calls_accum or None,
-            )
-
-            if finish == "tool_calls" or tool_calls_accum:
-                for call in tool_calls_accum:
-                    fn = call.get("function") or {}
-                    name = fn.get("name", "")
-                    raw_args = fn.get("arguments") or "{}"
-                    await bus.publish("chat.tool_call", {
-                        "session_id": session_id, "name": name,
-                    })
-                    result = await dispatch_tool(name, raw_args, session_id=session_id)
-                    await bus.publish("chat.tool_result", {
-                        "session_id": session_id,
-                        "name": name,
-                        "ok": "error" not in result,
-                    })
-                    await _append_message(
-                        session_id, "tool", json.dumps(result),
-                        tool_call_id=call.get("id") or name,
-                    )
-                continue
-            await bus.publish("chat.done", {
-                "session_id": session_id, "message_id": last_message_id,
+    async for evt in stream_chat_turns(session_id):
+        t = evt["type"]
+        if t == "delta":
+            await bus.publish("chat.delta", {
+                "session_id": session_id, "text": evt["text"],
             })
-            return
-
-        await bus.publish("chat.error", {
-            "session_id": session_id,
-            "message": "max tool-call iterations reached",
-        })
-        await bus.publish("chat.done", {
-            "session_id": session_id, "message_id": last_message_id,
-        })
-    except LLMError as e:
-        log.warning("background llm turn failed: %s", e)
-        await bus.publish("chat.error", {"session_id": session_id, "message": str(e)})
-        await bus.publish("chat.done", {
-            "session_id": session_id, "message_id": last_message_id,
-        })
-    except Exception as e:  # noqa: BLE001
-        log.exception("background llm turn crashed for session %s", session_id)
-        await bus.publish("chat.error", {
-            "session_id": session_id,
-            "message": f"{type(e).__name__}: {e}",
-        })
-        await bus.publish("chat.done", {
-            "session_id": session_id, "message_id": last_message_id,
-        })
+        elif t == "tool_call":
+            await bus.publish("chat.tool_call", {
+                "session_id": session_id, "name": evt["name"],
+            })
+        elif t == "tool_result":
+            await bus.publish("chat.tool_result", {
+                "session_id": session_id, "name": evt["name"], "ok": evt["ok"],
+            })
+        elif t == "error":
+            await bus.publish("chat.error", {
+                "session_id": session_id, "message": evt["message"],
+            })
+        elif t == "done":
+            await bus.publish("chat.done", {
+                "session_id": session_id, "message_id": evt["message_id"],
+            })
 
 
 # ---------------------------------------------------------------------------
