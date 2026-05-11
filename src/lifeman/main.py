@@ -147,7 +147,14 @@ app.include_router(ui_router)
 
 def cli():
     """CLI entry point for `lifeman` command."""
+    import os
     import uvicorn
+    # ``LIFEMAN_ALLOW_NETWORK=true`` on its own should be enough to expose the
+    # API to paired devices on the LAN — without this, the host stays at its
+    # loopback default and the flag is inert. If the user explicitly set
+    # ``LIFEMAN_HOST`` we honor it; otherwise we bind to all interfaces.
+    if settings.allow_network and "LIFEMAN_HOST" not in os.environ:
+        settings.host = "0.0.0.0"
     _enforce_loopback_only(settings.host)
     uvicorn.run(
         "lifeman.main:app",
