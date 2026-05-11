@@ -33,6 +33,15 @@ async def create_schedule(body: ScheduleCreate, _: str = Depends(require_auth)):
     if not tool_rows:
         raise HTTPException(400, f"Tool '{body.tool}' not found")
 
+    # Reject hallucinated context_refs up front (DESIGN.MD §"Risks").
+    if body.context_refs:
+        from lifeman.memory import missing_memory_refs
+        missing = await missing_memory_refs(body.context_refs)
+        if missing:
+            raise HTTPException(
+                400, f"unknown memory refs in context_refs: {missing}",
+            )
+
     sched_id = str(uuid.uuid4())[:12]
     now = datetime.now(timezone.utc).isoformat()
     try:
@@ -109,6 +118,14 @@ async def update_context(sched_id: str, body: ScheduleUpdate, _: str = Depends(r
     rows = await db.execute_fetchall("SELECT * FROM schedules WHERE id = ?", (sched_id,))
     if not rows:
         raise HTTPException(404, "Schedule not found")
+
+    if body.context_refs:
+        from lifeman.memory import missing_memory_refs
+        missing = await missing_memory_refs(body.context_refs)
+        if missing:
+            raise HTTPException(
+                400, f"unknown memory refs in context_refs: {missing}",
+            )
 
     updates = []
     params = []

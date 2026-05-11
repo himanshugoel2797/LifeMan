@@ -71,6 +71,25 @@ async def _register_tool(client, name="noop_tool"):
     assert r.status_code == 200, r.text
 
 
+async def _insert_memory(_client, *, content: str) -> str:
+    """Insert a memory row directly so context_refs validation has something
+    to resolve against. We hit the DB rather than the API so this works
+    independent of memory-routing rules / handler installation order."""
+    from datetime import datetime, timezone
+    import uuid
+
+    from lifeman.db import get_db
+    mid = str(uuid.uuid4())[:12]
+    db = await get_db()
+    await db.execute(
+        """INSERT INTO memories (id, content, type, created_at)
+           VALUES (?, ?, 'episodic', ?)""",
+        (mid, content, datetime.now(timezone.utc).isoformat()),
+    )
+    await db.commit()
+    return mid
+
+
 # ---------------------------------------------------------------------------
 # Create
 # ---------------------------------------------------------------------------
@@ -209,14 +228,32 @@ async def test_update_context_changes_args_and_context_refs(http_client):
     })
     sid = r.json()["id"]
 
+    # context_refs must resolve to real memories — seed one.
+    mem_id = await _insert_memory(http_client, content="ctx note")
+
     upd = await http_client.put(f"/api/schedules/{sid}/context", json={
-        "args": {"a": 2, "b": 3}, "context_refs": ["mem:42"],
+        "args": {"a": 2, "b": 3}, "context_refs": [mem_id],
     })
     assert upd.status_code == 200
 
     got = (await http_client.get(f"/api/schedules/{sid}")).json()
     assert got["args"] == {"a": 2, "b": 3}
-    assert got["context_refs"] == ["mem:42"]
+    assert got["context_refs"] == [mem_id]
+
+
+@pytest.mark.asyncio
+async def test_update_context_rejects_unknown_refs(http_client):
+    await _register_tool(http_client)
+    r = await http_client.post("/api/schedules", json={
+        "tool": "noop_tool", "args": {"a": 1}, "when": "1h", "reason": "t",
+    })
+    sid = r.json()["id"]
+
+    upd = await http_client.put(f"/api/schedules/{sid}/context", json={
+        "context_refs": ["mem:does-not-exist"],
+    })
+    assert upd.status_code == 400
+    assert "unknown memory refs" in upd.json()["detail"]
 
 
 @pytest.mark.asyncio

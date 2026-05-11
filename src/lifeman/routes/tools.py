@@ -26,6 +26,28 @@ from lifeman.models import (
 )
 
 log = logging.getLogger("lifeman.routes.tools")
+
+# Cap stored invocation results at 1 MB serialised. A runaway tool returning
+# multi-MB blobs would silently bloat the SQLite DB; we keep just enough to
+# debug what happened and replace the payload with a truncation marker.
+_RESULT_JSON_MAX_BYTES = 1_000_000
+
+
+def _cap_result_json(result: dict) -> str:
+    """Serialise `result` to JSON, swapping in a truncation marker if too big."""
+    body = json.dumps(result, default=str)
+    if len(body) <= _RESULT_JSON_MAX_BYTES:
+        return body
+    return json.dumps({
+        "_truncated": True,
+        "_original_bytes": len(body),
+        "_limit_bytes": _RESULT_JSON_MAX_BYTES,
+        "preview": body[:1024],
+        # Preserve the error key if present so the invocation row still
+        # reports the right top-level status.
+        **({"error": result["error"]} if isinstance(result, dict)
+           and isinstance(result.get("error"), str) else {}),
+    })
 from lifeman.sandbox import run_tool
 from lifeman.sse import bus
 from lifeman.tool_socket import ToolSocket
@@ -614,9 +636,10 @@ async def _execute_tool(
     finished = datetime.now(timezone.utc).isoformat()
     error = result.get("error")
     status = "error" if error else "ok"
+    stored_result_json = _cap_result_json(result)
     await db.execute(
         "UPDATE invocations SET result_json = ?, error = ?, finished_at = ?, status = ? WHERE id = ?",
-        (json.dumps(result), error, finished, status, inv_id),
+        (stored_result_json, error, finished, status, inv_id),
     )
     await db.commit()
 

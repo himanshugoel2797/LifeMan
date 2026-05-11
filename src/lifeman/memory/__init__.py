@@ -175,6 +175,32 @@ async def get_memory(memory_id: str) -> Memory | None:
     )
 
 
+async def missing_memory_refs(ref_ids: list[str]) -> list[str]:
+    """Return the subset of `ref_ids` that don't resolve to a stored memory.
+
+    Used to validate ``context_refs`` at schedule create/update time so a
+    hallucinated id is rejected up front rather than failing silently at
+    fire time (per DESIGN.MD §"Risks specific to Phase 1"). Non-string and
+    empty ids are reported as missing.
+    """
+    cleaned = [r for r in ref_ids if isinstance(r, str) and r]
+    if len(cleaned) != len(ref_ids):
+        # Caller passed empty strings / non-strings; surface them as missing.
+        cleaned_set = set(cleaned)
+        return [r for r in ref_ids if not isinstance(r, str) or not r
+                or r not in cleaned_set]
+    if not cleaned:
+        return []
+    db = await get_db()
+    placeholders = ",".join("?" * len(cleaned))
+    rows = await db.execute_fetchall(
+        f"SELECT id FROM memories WHERE id IN ({placeholders})",
+        tuple(cleaned),
+    )
+    present = {r["id"] for r in rows}
+    return [r for r in cleaned if r not in present]
+
+
 async def update_memory(
     memory_id: str,
     *,

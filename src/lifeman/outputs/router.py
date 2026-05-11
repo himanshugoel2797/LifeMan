@@ -424,19 +424,27 @@ async def _record_rule_proposal(
 
 
 async def _rate_limited(name: str, channel) -> bool:
-    """Check rate limits using on-disk delivery history."""
+    """Check rate limits using on-disk delivery history.
+
+    Cancelled deliveries are excluded: a cancel-then-retry pattern should not
+    permanently consume rate-limit slots. We count rows that are still in a
+    "the user saw this" state (delivered = 1 AND status != 'cancelled').
+    """
     per_min = channel.manifest.rate_limit_per_minute
     per_hour = channel.manifest.rate_limit_per_hour
     if not per_min and not per_hour:
         return False
     db = await get_db()
     now = datetime.now(timezone.utc)
+    base_where = (
+        "channel = ? AND delivered = 1 "
+        "AND (status IS NULL OR status != 'cancelled') "
+        "AND delivered_at > ?"
+    )
     if per_min:
-        cutoff = (now.timestamp() - 60)
-        cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+        cutoff_iso = datetime.fromtimestamp(now.timestamp() - 60, tz=timezone.utc).isoformat()
         rows = await db.execute_fetchall(
-            "SELECT COUNT(*) AS c FROM output_deliveries "
-            "WHERE channel = ? AND delivered = 1 AND delivered_at > ?",
+            f"SELECT COUNT(*) AS c FROM output_deliveries WHERE {base_where}",
             (name, cutoff_iso),
         )
         if rows[0]["c"] >= per_min:
@@ -444,8 +452,7 @@ async def _rate_limited(name: str, channel) -> bool:
     if per_hour:
         cutoff_iso = datetime.fromtimestamp(now.timestamp() - 3600, tz=timezone.utc).isoformat()
         rows = await db.execute_fetchall(
-            "SELECT COUNT(*) AS c FROM output_deliveries "
-            "WHERE channel = ? AND delivered = 1 AND delivered_at > ?",
+            f"SELECT COUNT(*) AS c FROM output_deliveries WHERE {base_where}",
             (name, cutoff_iso),
         )
         if rows[0]["c"] >= per_hour:

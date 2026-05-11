@@ -93,6 +93,14 @@ async def _handle_schedule(args: dict) -> dict:
         fires_at = compute_initial_fires_at(when)
     except ValueError as e:
         return {"error": str(e)}
+    # Validate context_refs up front so a hallucinated id is rejected at
+    # schedule time, not silently at fire time.
+    refs = args.get("context_refs") or []
+    if refs:
+        from lifeman.memory import missing_memory_refs
+        missing = await missing_memory_refs(refs)
+        if missing:
+            return {"error": f"unknown memory refs in context_refs: {missing}"}
     when_spec = json.dumps(when) if isinstance(when, dict) else str(when)
     await db.execute(
         """INSERT INTO schedules
@@ -405,6 +413,11 @@ async def _handle_update_context(args: dict) -> dict:
     new_refs = args.get("context_refs")
     if new_args is None and new_refs is None:
         return {"error": "no fields to update"}
+    if new_refs:
+        from lifeman.memory import missing_memory_refs
+        missing = await missing_memory_refs(new_refs)
+        if missing:
+            return {"error": f"unknown memory refs in context_refs: {missing}"}
     sets, vals = [], []
     if new_args is not None:
         sets.append("args_json = ?"); vals.append(json.dumps(new_args))

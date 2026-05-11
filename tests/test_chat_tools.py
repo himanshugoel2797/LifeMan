@@ -221,14 +221,53 @@ async def test_get_scheduled_not_found(temp_db):
 async def test_update_context_modifies_args(temp_db):
     s = await dispatch("schedule", json.dumps({"tool": "x", "when": "60s", "reason": "r"}))
     sid = s["id"]
+    # Seed real memory rows so context_refs validation has something to resolve.
+    from datetime import datetime, timezone
+    import uuid as _uuid
+    refs = []
+    for _ in range(2):
+        mid = str(_uuid.uuid4())[:12]
+        await temp_db.execute(
+            "INSERT INTO memories (id, content, type, created_at) "
+            "VALUES (?, ?, 'episodic', ?)",
+            (mid, "x", datetime.now(timezone.utc).isoformat()),
+        )
+        refs.append(mid)
+    await temp_db.commit()
+
     upd = await dispatch(
         "update_context",
-        json.dumps({"id": sid, "args": {"new": True}, "context_refs": ["a", "b"]}),
+        json.dumps({"id": sid, "args": {"new": True}, "context_refs": refs}),
     )
     assert upd == {"ok": True}
     got = await dispatch("get_scheduled", json.dumps({"id": sid}))
     assert got["args"] == {"new": True}
-    assert got["context_refs"] == ["a", "b"]
+    assert got["context_refs"] == refs
+
+
+@pytest.mark.asyncio
+async def test_update_context_rejects_unknown_refs(temp_db):
+    s = await dispatch("schedule", json.dumps({"tool": "x", "when": "60s", "reason": "r"}))
+    sid = s["id"]
+    res = await dispatch(
+        "update_context",
+        json.dumps({"id": sid, "context_refs": ["mem:nonexistent"]}),
+    )
+    assert "error" in res
+    assert "unknown memory refs" in res["error"]
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_unknown_refs(temp_db):
+    res = await dispatch(
+        "schedule",
+        json.dumps({
+            "tool": "x", "when": "60s", "reason": "r",
+            "context_refs": ["mem:bogus"],
+        }),
+    )
+    assert "error" in res
+    assert "unknown memory refs" in res["error"]
 
 
 @pytest.mark.asyncio
