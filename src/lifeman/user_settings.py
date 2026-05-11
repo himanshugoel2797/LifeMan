@@ -1,13 +1,13 @@
 """Key/value settings the user toggles to shape companion behaviour.
 
 Backed by the ``user_settings`` table. Values are stored as JSON so a new
-flag doesn't need a migration. Keys with well-defined semantics today:
+flag doesn't need a migration. The well-defined key today:
 
 * ``do_not_disturb`` (bool) — when True, ambient ticks are skipped and
   the output router can suppress non-urgent events.
-* ``sleep_schedule`` (dict) — ``{"start": "HH:MM", "end": "HH:MM"}`` in
-  the user's local time; honoured by the ``asleep`` state provider.
 
+Deliberately small: every other state signal (activity, busy, device
+online) is *inferred* from observed inputs rather than configured here.
 Adding a new flag is just calling ``set_setting``; nothing here cares
 about the key namespace.
 """

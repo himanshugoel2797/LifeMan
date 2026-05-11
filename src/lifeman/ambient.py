@@ -62,6 +62,57 @@ DEFAULT_USER_PROMPT = (
 )
 
 
+def _build_user_prompt(state: dict) -> str:
+    """Default user prompt enriched with the live user-state context.
+
+    The LLM sees what the system has inferred (time of day, recent
+    activity, busy status, device reachability) without needing to call
+    tools for the basics. Saves a round-trip and grounds the decision
+    in real signals."""
+    bits: list[str] = []
+    if state.get("period"):
+        bits.append(f"period={state['period']}")
+    if state.get("weekday"):
+        bits.append(f"weekday={state['weekday']}")
+    if state.get("activity"):
+        bits.append(f"activity={state['activity']}")
+    if state.get("idle_minutes") is not None:
+        bits.append(f"idle_minutes={state['idle_minutes']}")
+    if state.get("device_online") is not None:
+        bits.append(
+            f"device_online={'true' if state['device_online'] else 'false'}"
+        )
+    context = "; ".join(bits) if bits else "(no signals)"
+    return (
+        f"{DEFAULT_USER_PROMPT}\n\n"
+        f"Inferred user-state right now: {context}.\n"
+        "Use this to decide: if the user is long-idle, prefer recording "
+        "an observation over emitting an interrupt."
+    )
+
+
+def _skip_reason(state: dict) -> str | None:
+    """Decide whether to skip a tick based on user state.
+
+    Skip when:
+    * do_not_disturb is on (user's explicit override),
+    * the user is currently busy (an inferred busy window from an input
+      is active), or
+    * activity has been long_idle past the configured threshold (no
+      point thinking if there's been nobody around for an hour).
+    """
+    from lifeman.config import settings
+
+    if state.get("do_not_disturb"):
+        return "do_not_disturb"
+    if state.get("busy"):
+        return "busy"
+    idle = state.get("idle_minutes")
+    if isinstance(idle, int) and idle >= settings.ambient_skip_after_idle_minutes:
+        return f"long_idle:{idle}m"
+    return None
+
+
 async def start() -> None:
     """Launch the recurring ambient cycle if enabled."""
     global _task
@@ -130,20 +181,20 @@ async def run_one_cycle(
     from lifeman.user_state import get_state
 
     state = await get_state()
-    if state.get("do_not_disturb") or state.get("asleep"):
-        reason = "do_not_disturb" if state.get("do_not_disturb") else "asleep"
+    skip_reason = _skip_reason(state)
+    if skip_reason is not None:
         await audit.log(
             source="ambient", action="ambient_tick_skipped",
-            args_summary=reason, reason="user state suppresses ambient tick",
+            args_summary=skip_reason, reason="user state suppresses ambient tick",
         )
         return {
             "tick_id": "", "iterations": 0, "tool_calls": 0,
-            "finished": "skipped", "skipped": True, "skip_reason": reason,
+            "finished": "skipped", "skipped": True, "skip_reason": skip_reason,
         }
 
     tick_id = str(uuid.uuid4())[:12]
     sys_p = system_prompt or DEFAULT_SYSTEM_PROMPT
-    usr_p = user_prompt or DEFAULT_USER_PROMPT
+    usr_p = user_prompt or _build_user_prompt(state)
     messages: list[dict] = [
         {"role": "system", "content": sys_p},
         {"role": "user", "content": usr_p},

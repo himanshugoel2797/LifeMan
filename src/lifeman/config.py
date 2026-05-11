@@ -62,15 +62,19 @@ class Settings(BaseSettings):
     backup_interval_hours: float = 24.0         # 0 disables the scheduled task
     backup_retention_count: int = 14            # keep the N most-recent files
 
-    # Ambient cycle: the proactive reasoning loop. Off by default — turning
-    # it on means the LLM runs on a timer regardless of user input, so
-    # there's a real cost (tokens, watt-hours, attention if it misfires).
-    # See lifeman.ambient.
-    ambient_enabled: bool = False
+    # Ambient cycle: the proactive reasoning loop. On by default — the
+    # cycle gates itself on do_not_disturb / busy / long_idle, so it
+    # doesn't fire pointlessly. Set LIFEMAN_AMBIENT_ENABLED=false to
+    # disable entirely. See lifeman.ambient.
+    ambient_enabled: bool = True
     ambient_interval_minutes: int = 15
     # Per-tick bound on tool/model round-trips. Smaller than live chat (6)
     # because an ambient tick should decide quickly and silently exit.
     ambient_max_iterations: int = 4
+    # When the most recent input is older than this, ambient skips —
+    # the user is away/asleep/at lunch; let them come back to a clean
+    # slate rather than a wall of synthesised reminders.
+    ambient_skip_after_idle_minutes: int = 60
 
     def get_db_path(self) -> Path:
         return self.db_path or (self.data_dir / "data.db")

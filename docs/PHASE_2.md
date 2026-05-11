@@ -140,23 +140,39 @@ context without coupling to any specific provider.
 Populate `_user_state()` from real signals so the router can actually
 suppress or defer outputs.
 
+**Key principle**: every state signal except the user's explicit DND
+override is *inferred from observed inputs*, not configured as a
+parameter. The system learns what's happening from what actually
+happens.
+
 Concretely:
 
 - A `user_state_providers` registry: ordered list of callables that
   each contribute a slice of state.
 - Built-in providers:
   - `time_of_day`: hour bucket + weekday vs weekend. Always available.
-  - `dnd`: read a flag from a new `user_settings` table. UI/API can
-    toggle it.
-  - `calendar_busy`: if any subscription of kind `ical` is configured,
-    set `state.busy = true` when there's an event spanning *now*.
-  - `device_offline`: from `bus.has_targeted_subscriber` — if no device
-    is connected, default to "deferred" rather than dropping outputs.
-- `_user_state()` becomes the merge of all providers' contributions
-  (last writer wins on key collisions, with an audit note).
+  - `dnd`: read the `do_not_disturb` flag from `user_settings` (the
+    one explicit override the user controls).
+  - `activity`: derive from the most recent `input_events` row —
+    `last_input_at`, `idle_minutes`, `activity` (`active` /
+    `idle` / `long_idle` / `no_data`). Replaces what used to be a
+    `sleep_schedule` user setting; the system learns availability
+    from what surfaces the user actually interacts with.
+  - `busy`: scan recent `input_events` with `intent_hint='busy'`
+    (or `busy:<source>`) whose `expires_at` is still in the future.
+    Anything that knows the user is busy — an ical-polling
+    subscription, a focus-mode app, a tool — emits these inputs;
+    the provider takes care of the now-in-window check. No
+    configured calendar URL.
+  - `device_status`: from `bus.has_targeted_subscriber` — if no
+    paired device is reachable, the router can defer outputs.
+- `get_state()` is the merge of all providers (last writer wins on
+  key collisions, with an audit log line).
 - Router rules can already gate on `state` keys — no router change
   needed.
-- The ambient tick reads the same state and skips when appropriate.
+- The ambient tick reads the same state and skips when appropriate
+  (DND, busy, or long_idle past
+  `settings.ambient_skip_after_idle_minutes`).
 
 ## Out of scope for this phase
 

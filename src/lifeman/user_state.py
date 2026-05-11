@@ -21,9 +21,21 @@ State keys emitted by built-in providers:
   ``period`` (str: morning|afternoon|evening|night) — from
   ``time_of_day_provider``. Always present.
 * ``do_not_disturb`` (bool) — from ``dnd_provider`` if the user
-  settings flag is on.
-* ``asleep`` (bool) — from ``sleep_schedule_provider`` if the current
-  local time falls inside the user's configured sleep window.
+  settings flag is on. The one explicit override the user can set;
+  every other state key is *inferred* from what the system has actually
+  observed.
+* ``activity`` (str: active|idle|long_idle|no_data),
+  ``idle_minutes`` (int), ``last_input_at`` (str) — from
+  ``activity_provider``. Derived from the most recent ``input_events``
+  row, not from a user-configured sleep schedule: if you've been
+  producing inputs (chat, voice, watch, notification clicks, …), the
+  system knows you're around.
+* ``busy`` (bool), ``busy_until`` (str), ``busy_source`` (str) — from
+  ``busy_provider``, derived from any ``input_events`` row tagged
+  ``intent_hint='busy'`` whose ``expires_at`` is still in the future.
+  Whatever feeds calendar info into the system (an ical subscription,
+  a tool, the user) just emits these inputs; the provider takes care
+  of the now-in-window check.
 * ``device_online`` (bool) — from ``device_status_provider``; true
   iff at least one non-revoked paired device has a live SSE subscriber.
 """
@@ -31,7 +43,7 @@ State keys emitted by built-in providers:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, time
+from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 log = logging.getLogger("lifeman.user_state")
@@ -127,36 +139,81 @@ async def dnd_provider() -> dict:
     return {}
 
 
-def _parse_hhmm(s: str) -> time | None:
+async def activity_provider() -> dict:
+    """Infer the user's recent activity from the ``input_events`` table.
+
+    Emits ``last_input_at`` (ISO timestamp of the most recent input),
+    ``idle_minutes`` (whole minutes since that input), and ``activity``:
+
+    * ``active`` — last input within 5 minutes
+    * ``idle``   — within 60 minutes
+    * ``long_idle`` — older than 60 minutes
+    * ``no_data`` — no input has ever been observed (fresh install)
+
+    Inputs of any surface count (chat, voice, watch, notification clicks,
+    subscription webhooks). This replaces the older
+    ``sleep_schedule_provider`` — the system learns activity from what
+    actually happens, not from a static schedule the user configures.
+    """
+    from lifeman.db import get_db
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT emitted_at FROM input_events ORDER BY emitted_at DESC LIMIT 1"
+    )
+    if not rows:
+        return {"activity": "no_data"}
+    last_iso = rows[0]["emitted_at"]
     try:
-        parts = s.split(":")
-        if len(parts) != 2:
-            return None
-        return time(hour=int(parts[0]), minute=int(parts[1]))
-    except (ValueError, TypeError):
-        return None
-
-
-async def sleep_schedule_provider() -> dict:
-    """Emits ``asleep: True`` when local time is inside the user's
-    configured sleep window. Supports overnight windows
-    (e.g. 23:00 → 07:00) by comparing the half-open range with wrap-around.
-    Absent or malformed schedule -> no key emitted."""
-    from lifeman.user_settings import get_setting
-    sched = await get_setting("sleep_schedule")
-    if not isinstance(sched, dict):
-        return {}
-    start = _parse_hhmm(sched.get("start", ""))
-    end = _parse_hhmm(sched.get("end", ""))
-    if start is None or end is None:
-        return {}
-    now = datetime.now().astimezone().time()
-    if start < end:
-        asleep = start <= now < end
+        last = datetime.fromisoformat(last_iso)
+    except ValueError:
+        return {"activity": "no_data"}
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    delta_min = max(0, int((datetime.now(timezone.utc) - last).total_seconds() // 60))
+    if delta_min < 5:
+        activity = "active"
+    elif delta_min < 60:
+        activity = "idle"
     else:
-        # Overnight window: asleep if now >= start OR now < end.
-        asleep = now >= start or now < end
-    return {"asleep": True} if asleep else {}
+        activity = "long_idle"
+    return {
+        "last_input_at": last_iso,
+        "idle_minutes": delta_min,
+        "activity": activity,
+    }
+
+
+async def busy_provider() -> dict:
+    """Infer "user is busy right now" from input_events.
+
+    Anything that knows the user is busy — an ical-polling subscription,
+    a calendar-syncing tool, a focus-mode app — emits an input_event with
+    ``intent_hint='busy'`` and ``expires_at`` set to when the busy window
+    ends. This provider scans for any such event whose window hasn't
+    elapsed yet; if found, emits ``busy=True`` plus the end time and the
+    source so consumers can audit.
+
+    No user-configured calendar parameter. The shape of "busy" lives in
+    the inputs the system has actually observed.
+    """
+    from lifeman.db import get_db
+    db = await get_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = await db.execute_fetchall(
+        "SELECT intent_hint, expires_at, source FROM input_events "
+        "WHERE (intent_hint = 'busy' OR intent_hint LIKE 'busy:%') "
+        "AND expires_at IS NOT NULL AND expires_at > ? "
+        "ORDER BY expires_at DESC LIMIT 1",
+        (now_iso,),
+    )
+    if not rows:
+        return {}
+    r = dict(rows[0])
+    return {
+        "busy": True,
+        "busy_until": r["expires_at"],
+        "busy_source": r["source"] or "",
+    }
 
 
 async def device_status_provider() -> dict:
@@ -180,6 +237,7 @@ def install_builtin_providers() -> None:
     """Register the kernel's built-in providers. Called from main lifespan."""
     register_provider("time_of_day", time_of_day_provider)
     register_provider("dnd", dnd_provider)
-    register_provider("sleep_schedule", sleep_schedule_provider)
+    register_provider("activity", activity_provider)
+    register_provider("busy", busy_provider)
     register_provider("device_status", device_status_provider)
     log.info("installed built-in user-state providers")

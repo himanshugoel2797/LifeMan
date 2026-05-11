@@ -112,9 +112,9 @@ async def test_delete_unknown_setting_returns_404(http_client):
 @pytest.mark.asyncio
 async def test_settings_round_trip_arbitrary_json(http_client):
     """The settings store accepts any JSON-serialisable shape."""
-    val = {"start": "23:00", "end": "07:00", "tz": "America/New_York"}
+    val = {"nested": {"foo": 1}, "list": [1, 2, 3], "str": "hi"}
     await http_client.put(
-        "/api/user/settings/sleep_schedule", json={"value": val},
+        "/api/user/settings/custom_pref", json={"value": val},
     )
     listed = (await http_client.get("/api/user/settings")).json()
-    assert listed["sleep_schedule"] == val
+    assert listed["custom_pref"] == val

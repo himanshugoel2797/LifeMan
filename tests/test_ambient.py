@@ -125,13 +125,18 @@ async def test_dnd_short_circuits_tick(temp_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_asleep_short_circuits_tick(temp_db, monkeypatch):
-    async def asleep_provider():
-        return {"asleep": True}
+async def test_busy_short_circuits_tick(temp_db, monkeypatch):
+    """A live busy window (inferred from input_events) suppresses the tick."""
+    async def busy_provider():
+        return {"busy": True, "busy_until": "2099-01-01T00:00:00+00:00"}
 
-    user_state.register_provider("asleep_test", asleep_provider)
+    user_state.register_provider("busy_test", busy_provider)
+
+    called = False
 
     async def fake_stream(messages, tools=None, model=None, temperature=0.7):
+        nonlocal called
+        called = True
         yield {"finish_reason": "stop"}
 
     import lifeman.llm as llm_mod
@@ -139,7 +144,52 @@ async def test_asleep_short_circuits_tick(temp_db, monkeypatch):
 
     summary = await ambient.run_one_cycle()
     assert summary["skipped"] is True
-    assert summary["skip_reason"] == "asleep"
+    assert summary["skip_reason"] == "busy"
+    assert not called, "LLM must not run while user is busy"
+
+
+@pytest.mark.asyncio
+async def test_long_idle_short_circuits_tick(temp_db, monkeypatch):
+    """No point thinking if there's been no activity for an hour."""
+    async def long_idle_provider():
+        return {"activity": "long_idle", "idle_minutes": 240}
+
+    user_state.register_provider("idle_test", long_idle_provider)
+
+    called = False
+
+    async def fake_stream(messages, tools=None, model=None, temperature=0.7):
+        nonlocal called
+        called = True
+        yield {"finish_reason": "stop"}
+
+    import lifeman.llm as llm_mod
+    monkeypatch.setattr(llm_mod, "stream_chat", fake_stream)
+
+    summary = await ambient.run_one_cycle()
+    assert summary["skipped"] is True
+    assert summary["skip_reason"].startswith("long_idle")
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_idle_under_threshold_does_not_skip(temp_db, monkeypatch):
+    """User stepped away briefly (30min) — still run, the user may come back soon."""
+    async def idle_provider():
+        return {"activity": "idle", "idle_minutes": 30}
+
+    user_state.register_provider("idle_test", idle_provider)
+
+    async def fake_stream(messages, tools=None, model=None, temperature=0.7):
+        yield {"content": ""}
+        yield {"finish_reason": "stop"}
+
+    import lifeman.llm as llm_mod
+    monkeypatch.setattr(llm_mod, "stream_chat", fake_stream)
+
+    summary = await ambient.run_one_cycle()
+    assert summary["skipped"] is False
+    assert summary["finished"] == "done"
 
 
 @pytest.mark.asyncio

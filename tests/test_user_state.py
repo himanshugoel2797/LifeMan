@@ -6,7 +6,7 @@ isolation) and each built-in provider's contract.
 
 from __future__ import annotations
 
-from datetime import time as dtime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -122,63 +122,123 @@ async def test_dnd_provider_silent_when_false(temp_db):
 
 
 # ---------------------------------------------------------------------------
-# sleep_schedule_provider
+# activity_provider — derived from input_events
+# ---------------------------------------------------------------------------
+
+
+async def _insert_input(db, minutes_ago: int, intent_hint: str | None = None,
+                        expires_at: str | None = None) -> None:
+    """Helper: insert one input_events row at NOW - minutes_ago."""
+    import json as _json
+    import uuid as _uuid
+    when = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    await db.execute(
+        """INSERT INTO input_events
+             (id, surface, raw_payload, intent_hint, source, sensitivity,
+              expires_at, context_json, reason, emitted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            str(_uuid.uuid4())[:12], "chat", "test", intent_hint, "user",
+            "personal", expires_at, _json.dumps({}), "test",
+            when.isoformat(),
+        ),
+    )
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_activity_no_data_when_no_inputs(temp_db):
+    out = await user_state.activity_provider()
+    assert out == {"activity": "no_data"}
+
+
+@pytest.mark.asyncio
+async def test_activity_active_when_input_in_last_5_min(temp_db):
+    await _insert_input(temp_db, minutes_ago=2)
+    out = await user_state.activity_provider()
+    assert out["activity"] == "active"
+    assert out["idle_minutes"] < 5
+    assert out["last_input_at"]
+
+
+@pytest.mark.asyncio
+async def test_activity_idle_between_5_and_60_min(temp_db):
+    await _insert_input(temp_db, minutes_ago=30)
+    out = await user_state.activity_provider()
+    assert out["activity"] == "idle"
+    assert 25 <= out["idle_minutes"] <= 35
+
+
+@pytest.mark.asyncio
+async def test_activity_long_idle_past_60_min(temp_db):
+    await _insert_input(temp_db, minutes_ago=120)
+    out = await user_state.activity_provider()
+    assert out["activity"] == "long_idle"
+    assert out["idle_minutes"] >= 60
+
+
+@pytest.mark.asyncio
+async def test_activity_picks_most_recent_when_multiple(temp_db):
+    await _insert_input(temp_db, minutes_ago=200)  # old
+    await _insert_input(temp_db, minutes_ago=1)    # fresh
+    out = await user_state.activity_provider()
+    assert out["activity"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# busy_provider — derived from input_events with intent_hint='busy'
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_sleep_schedule_provider_handles_overnight_window(temp_db, monkeypatch):
-    """The common case: bedtime 23:00, wake 07:00. Asleep at 02:00."""
-    from lifeman.user_settings import set_setting
-    await set_setting("sleep_schedule", {"start": "23:00", "end": "07:00"})
+async def test_busy_silent_when_no_busy_events(temp_db):
+    await _insert_input(temp_db, minutes_ago=1)  # not a busy event
+    assert await user_state.busy_provider() == {}
 
-    class _FakeNow:
-        @staticmethod
-        def time() -> dtime:
-            return dtime(2, 0)
 
-    monkeypatch.setattr(
-        "lifeman.user_state.datetime",
-        type("_D", (), {
-            "now": staticmethod(lambda: type("_X", (), {
-                "astimezone": staticmethod(lambda: _FakeNow()),
-            })()),
-        }),
+@pytest.mark.asyncio
+async def test_busy_emits_when_window_currently_active(temp_db):
+    future = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+    await _insert_input(
+        temp_db, minutes_ago=1, intent_hint="busy", expires_at=future,
     )
-    assert await user_state.sleep_schedule_provider() == {"asleep": True}
+    out = await user_state.busy_provider()
+    assert out["busy"] is True
+    assert out["busy_until"] == future
 
 
 @pytest.mark.asyncio
-async def test_sleep_schedule_provider_silent_during_waking_hours(temp_db, monkeypatch):
-    from lifeman.user_settings import set_setting
-    await set_setting("sleep_schedule", {"start": "23:00", "end": "07:00"})
-
-    class _FakeNow:
-        @staticmethod
-        def time() -> dtime:
-            return dtime(14, 0)  # afternoon
-
-    monkeypatch.setattr(
-        "lifeman.user_state.datetime",
-        type("_D", (), {
-            "now": staticmethod(lambda: type("_X", (), {
-                "astimezone": staticmethod(lambda: _FakeNow()),
-            })()),
-        }),
+async def test_busy_silent_when_window_expired(temp_db):
+    past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    await _insert_input(
+        temp_db, minutes_ago=60, intent_hint="busy", expires_at=past,
     )
-    assert await user_state.sleep_schedule_provider() == {}
+    assert await user_state.busy_provider() == {}
 
 
 @pytest.mark.asyncio
-async def test_sleep_schedule_provider_silent_when_unconfigured(temp_db):
-    assert await user_state.sleep_schedule_provider() == {}
+async def test_busy_accepts_namespaced_intent_hint(temp_db):
+    """intent_hint='busy:calendar' or 'busy:focus' should also match."""
+    future = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+    await _insert_input(
+        temp_db, minutes_ago=1, intent_hint="busy:meeting", expires_at=future,
+    )
+    out = await user_state.busy_provider()
+    assert out["busy"] is True
 
 
 @pytest.mark.asyncio
-async def test_sleep_schedule_provider_ignores_malformed(temp_db):
-    from lifeman.user_settings import set_setting
-    await set_setting("sleep_schedule", {"start": "not-a-time"})
-    assert await user_state.sleep_schedule_provider() == {}
+async def test_busy_picks_latest_window_when_multiple(temp_db):
+    near = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    far = (datetime.now(timezone.utc) + timedelta(minutes=60)).isoformat()
+    await _insert_input(
+        temp_db, minutes_ago=1, intent_hint="busy", expires_at=near,
+    )
+    await _insert_input(
+        temp_db, minutes_ago=1, intent_hint="busy", expires_at=far,
+    )
+    out = await user_state.busy_provider()
+    assert out["busy_until"] == far
 
 
 # ---------------------------------------------------------------------------
@@ -224,4 +284,10 @@ async def test_install_builtin_providers_populates_state(temp_db):
     # time_of_day keys always present
     assert "hour" in state
     assert "period" in state
+    # activity key is always emitted (no_data if no inputs)
+    assert state["activity"] == "no_data"
+    # device_online derived from bus (no devices in test → False)
     assert state.get("device_online") is False
+    # busy/do_not_disturb are absent unless triggered
+    assert "busy" not in state
+    assert "do_not_disturb" not in state
