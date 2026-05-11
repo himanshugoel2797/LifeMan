@@ -23,7 +23,6 @@ from lifeman.outputs.models import (
     StructuredContent,
     UserResponse,
 )
-from lifeman.outputs.registry import registry
 from lifeman.outputs.router import route
 from lifeman.outputs import tool_backed
 from lifeman.sse import bus
@@ -371,13 +370,12 @@ async def report_response(
     invocation_result: dict | None = None
     if matched is not None:
         from lifeman.routes.tools import _execute_tool
-        invocation_result = await _execute_tool(
+        _, invocation_result = await _execute_tool(
             matched.invoke_tool,
             matched.invoke_args,
             source=f"output_response:{channel}" if channel else "output_response",
             reason=f"user response to {output_id} via {channel or 'unknown'}",
         )
-        invocation_result.pop("_invocation_id", None)
 
     await audit.log(
         source=source_tool or (f"channel:{channel}" if channel else "user"),

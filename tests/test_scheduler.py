@@ -44,7 +44,7 @@ async def test_fire_advances_one_shot_to_cancelled(temp_db, monkeypatch):
 
     async def fake_execute_tool(tool, args, *, source, schedule_id=None, **kw):
         fired.append(tool)
-        return {"ok": True}
+        return ("inv-test", {"ok": True})
 
     # Patch the tool runner so we don't need a real tool installed.
     import lifeman.routes.tools as tools_mod
@@ -72,7 +72,7 @@ async def test_in_flight_set_blocks_double_select(temp_db, monkeypatch):
     async def slow_execute(tool, args, **kw):
         fired.append(tool)
         await asyncio.sleep(0.05)
-        return {"ok": True}
+        return ("inv-test", {"ok": True})
 
     import lifeman.routes.tools as tools_mod
     monkeypatch.setattr(tools_mod, "_execute_tool", slow_execute)
@@ -103,7 +103,7 @@ async def test_fire_reserves_fires_at_before_running_tool(temp_db, monkeypatch):
             "SELECT fires_at FROM schedules WHERE id = ?", (schedule_id,)
         )
         sid_box.append(rows[0]["fires_at"])
-        return {"ok": True}
+        return ("inv-test", {"ok": True})
 
     import lifeman.routes.tools as tools_mod
     monkeypatch.setattr(tools_mod, "_execute_tool", execute_and_check)
@@ -120,7 +120,7 @@ async def test_fire_reserves_fires_at_before_running_tool(temp_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_recurring_schedule_advances_to_next_occurrence(temp_db, monkeypatch):
     async def fake_execute(tool, args, **kw):
-        return {"ok": True}
+        return ("inv-test", {"ok": True})
 
     import lifeman.routes.tools as tools_mod
     monkeypatch.setattr(tools_mod, "_execute_tool", fake_execute)

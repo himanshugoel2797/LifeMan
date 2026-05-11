@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 import aiosqlite
-from pathlib import Path
 
 from lifeman.config import settings
 

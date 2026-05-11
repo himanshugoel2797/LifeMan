@@ -13,7 +13,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 from lifeman import audit
 from lifeman.db import get_db
@@ -50,14 +50,13 @@ async def _handle_invoke(args: dict, *, session_id: str | None = None) -> dict:
     tool = args.get("tool")
     if not tool:
         return {"error": "missing 'tool'"}
-    result = await _execute_tool(
+    _, result = await _execute_tool(
         tool,
         args.get("args") or {},
         source="llm",
         reason=args.get("reason", "live_chat"),
         session_id=session_id,
     )
-    result.pop("_invocation_id", None)
     return result
 
 
@@ -346,17 +345,22 @@ async def _handle_describe_tool(args: dict) -> dict:
         "FROM tool_manifests WHERE tool_id = ? ORDER BY version DESC LIMIT 1",
         (t["id"],),
     )
+    def _try_load(raw: str | None) -> dict:
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+
     manifest: dict = {}
     schema_input: dict = {}
     schema_output: dict = {}
     if manifest_rows:
         m = dict(manifest_rows[0])
-        try: manifest = json.loads(m["manifest_json"])
-        except json.JSONDecodeError: pass
-        try: schema_input = json.loads(m["schema_input_json"])
-        except json.JSONDecodeError: pass
-        try: schema_output = json.loads(m["schema_output_json"])
-        except json.JSONDecodeError: pass
+        manifest = _try_load(m["manifest_json"])
+        schema_input = _try_load(m["schema_input_json"])
+        schema_output = _try_load(m["schema_output_json"])
     recent = await db.execute_fetchall(
         "SELECT id, source, started_at, finished_at, error FROM invocations "
         "WHERE tool = ? ORDER BY started_at DESC LIMIT 5",
@@ -465,25 +469,13 @@ async def _handle_recurrence_status(args: dict) -> dict:
 
 
 async def _handle_request_permission(args: dict) -> dict:
-    db = await get_db()
-    pid = str(uuid.uuid4())[:12]
-    now = datetime.now(timezone.utc).isoformat()
-    await db.execute(
-        """INSERT INTO permission_requests
-           (id, requester, capability, scope_json, reason, status, requested_at)
-           VALUES (?, 'llm', ?, ?, ?, 'pending', ?)""",
-        (
-            pid,
-            args.get("capability", ""),
-            json.dumps(args.get("scope") or {}),
-            args.get("reason", ""),
-            now,
-        ),
-    )
-    await db.commit()
-    await audit.log(
-        source="llm", action="request_permission",
-        target=args.get("capability", ""), reason=args.get("reason", ""),
+    from lifeman.permissions_runtime import create_permission_request
+
+    pid = await create_permission_request(
+        requester="llm",
+        capability=args.get("capability", ""),
+        scope=args.get("scope") or {},
+        reason=args.get("reason", ""),
     )
     return {"id": pid, "status": "pending"}
 

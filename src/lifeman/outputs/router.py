@@ -300,7 +300,7 @@ async def _llm_pick_channels(event: OutputEvent) -> list[str] | None:
     if not available:
         return None
 
-    from lifeman.llm import stream_chat, LLMError
+    from lifeman.llm import stream_chat
 
     channel_lines = []
     for name in available:
@@ -359,7 +359,7 @@ async def _llm_pick_channels(event: OutputEvent) -> list[str] | None:
             usage, surface="output_router",
             latency_ms=int(_time.monotonic() * 1000 - started_ms),
         )
-    except (LLMError, asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — soft-fail: must always return a route
         log.info("router LLM fallback unavailable: %s", e)
         return None
 

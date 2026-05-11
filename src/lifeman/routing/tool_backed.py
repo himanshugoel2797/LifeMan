@@ -21,10 +21,9 @@ log = logging.getLogger("lifeman.routing.tool_backed")
 async def _execute(
     tool_name: str, args: dict, *, source: str, reason: str,
 ) -> dict:
-    """Run a tool and unwrap its result for direct consumption."""
+    """Run a tool and return only its result dict (drops the invocation_id)."""
     from lifeman.routes.tools import _execute_tool
-    result = await _execute_tool(tool_name, args, source=source, reason=reason)
-    result.pop("_invocation_id", None)
+    _, result = await _execute_tool(tool_name, args, source=source, reason=reason)
     return result
 
 

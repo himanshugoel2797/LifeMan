@@ -24,6 +24,7 @@ not leak credentials. Plaintext is never logged.
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -139,8 +140,6 @@ async def consume_pairing_code(
 
     Raises ``ValueError`` if the code is unknown, already consumed, or expired.
     """
-    import json
-
     db = await get_db()
     now = _now()
     rows = await db.execute_fetchall(
@@ -211,8 +210,6 @@ async def lookup_device_by_token(token: str) -> DeviceRow | None:
     lookup at the index level, no plaintext compare. Revoked rows return
     ``None`` so callers don't need to re-check.
     """
-    import json
-
     if not token:
         return None
     db = await get_db()
@@ -252,8 +249,6 @@ async def touch_last_seen(device_id: str) -> None:
 
 
 async def list_devices(*, include_revoked: bool = True) -> list[DeviceRow]:
-    import json
-
     db = await get_db()
     if include_revoked:
         rows = await db.execute_fetchall(

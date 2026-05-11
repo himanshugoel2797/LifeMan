@@ -29,6 +29,10 @@ log = logging.getLogger("lifeman.inputs.handlers")
 
 registry = HandlerRegistry()
 
+# Strong refs for fire-and-forget background turns. asyncio.create_task()
+# alone is unsafe — Python may GC the task before it finishes.
+_pending_tasks: set[asyncio.Task] = set()
+
 
 # ---------------------------------------------------------------------------
 # llm: append the input as a user message in the most-recent live_chat
@@ -79,7 +83,9 @@ async def _llm_handle(event: dict) -> dict:
     # Kick off a model turn in the background so SSE subscribers see the
     # assistant respond. We don't await — the handler returns as soon as the
     # user message is durably stored.
-    asyncio.create_task(_drive_background_turn(session_id))
+    task = asyncio.create_task(_drive_background_turn(session_id))
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
 
     return {"ok": True, "session_id": session_id, "delivery_id": msg_id}
 
@@ -200,12 +206,11 @@ async def _direct_invoke_handle(event: dict) -> dict:
     if not tool:
         return {"error": "missing 'tool' in payload"}
     from lifeman.routes.tools import _execute_tool
-    result = await _execute_tool(
+    inv_id, result = await _execute_tool(
         tool, payload.get("args") or {},
         source="input",
         reason=payload.get("reason") or event.get("reason", "direct invoke from input"),
     )
-    inv_id = result.pop("_invocation_id", "")
     if "error" in result:
         return {"error": result["error"], "delivery_id": inv_id}
     return {"ok": True, "delivery_id": inv_id, "result": result}

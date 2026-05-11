@@ -11,7 +11,6 @@ Run standalone: `lifeman-mcp` (entry point) or `python -m lifeman.mcp_server`.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any

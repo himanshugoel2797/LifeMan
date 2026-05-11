@@ -6,10 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-
-log = logging.getLogger("lifeman.routes.tools")
+from datetime import datetime, timedelta, timezone
 
 import jsonschema
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,16 +20,22 @@ from lifeman.models import (
     InvokeRequest,
     InvokeResponse,
     Invocation,
-    Tool,
     ToolCreate,
     ToolDetail,
     ToolSummary,
 )
+
+log = logging.getLogger("lifeman.routes.tools")
 from lifeman.sandbox import run_tool
 from lifeman.sse import bus
 from lifeman.tool_socket import ToolSocket
 
 router = APIRouter()
+
+# Strong references for fire-and-forget background invocations. Without this,
+# Python may GC the task before _runner finishes, killing the invocation
+# mid-flight. See asyncio.create_task() docs: "Save a reference to the result."
+_pending_tasks: set[asyncio.Task] = set()
 
 
 @router.post("", response_model=IdResponse)
@@ -98,38 +101,48 @@ async def list_tools(
             "SELECT * FROM tools WHERE deprecated_at IS NULL ORDER BY name"
         )
 
+    # Batch the two follow-up lookups so we don't fire 2N queries.
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    inv_counts = {
+        r["tool"]: r["cnt"]
+        for r in await db.execute_fetchall(
+            "SELECT tool, COUNT(*) AS cnt FROM invocations "
+            "WHERE started_at > ? GROUP BY tool",
+            (week_ago,),
+        )
+    }
+    latest_manifests = {
+        r["tool_id"]: r["manifest_json"]
+        for r in await db.execute_fetchall(
+            "SELECT m.tool_id, m.manifest_json FROM tool_manifests m "
+            "INNER JOIN (SELECT tool_id, MAX(version) AS v "
+            "FROM tool_manifests GROUP BY tool_id) latest "
+            "ON m.tool_id = latest.tool_id AND m.version = latest.v"
+        )
+    }
+
     result = []
     for r in rows:
         r = dict(r)
-        # Count recent invocations
-        week_ago = (datetime.now(timezone.utc) - __import__("datetime").timedelta(days=7)).isoformat()
-        inv_count = await db.execute_fetchall(
-            "SELECT COUNT(*) as cnt FROM invocations WHERE tool = ? AND started_at > ?",
-            (r["name"], week_ago),
-        )
-        count = inv_count[0]["cnt"] if inv_count else 0
-
-        # Get manifest summary
-        manifest_rows = await db.execute_fetchall(
-            "SELECT manifest_json FROM tool_manifests WHERE tool_id = ? ORDER BY version DESC LIMIT 1",
-            (r["id"],),
-        )
-        manifest_summary = {}
-        if manifest_rows:
-            m = json.loads(manifest_rows[0]["manifest_json"])
-            manifest_summary = {
-                "reads": len(m.get("reads", [])),
-                "writes": len(m.get("writes", [])),
-                "network": len(m.get("network", [])),
-            }
-
+        manifest_summary: dict = {}
+        mj = latest_manifests.get(r["id"])
+        if mj:
+            try:
+                m = json.loads(mj)
+                manifest_summary = {
+                    "reads": len(m.get("reads", [])),
+                    "writes": len(m.get("writes", [])),
+                    "network": len(m.get("network", [])),
+                }
+            except json.JSONDecodeError:
+                pass
         result.append(ToolSummary(
             id=r["id"],
             name=r["name"],
             description=r["description"],
             category=r["category"],
             manifest_summary=manifest_summary,
-            invocations_last_week=count,
+            invocations_last_week=inv_counts.get(r["name"], 0),
         ))
     return result
 
@@ -247,8 +260,9 @@ async def invoke_tool(tool_id: str, body: InvokeRequest, _: str = Depends(requir
         raise HTTPException(404, "Tool not found")
     tool_name = dict(row[0])["name"]
 
-    result = await _execute_tool(tool_name, body.args, source="user", reason=body.reason)
-    invocation_id = result.pop("_invocation_id", "")
+    invocation_id, result = await _execute_tool(
+        tool_name, body.args, source="user", reason=body.reason,
+    )
     error = result.get("error")
 
     return InvokeResponse(
@@ -262,8 +276,9 @@ async def invoke_tool(tool_id: str, body: InvokeRequest, _: str = Depends(requir
 @router.post("/invoke", response_model=InvokeResponse)
 async def invoke_tool_by_name(body: InvokeRequest, _: str = Depends(require_auth)):
     """Invoke a tool by name."""
-    result = await _execute_tool(body.tool, body.args, source="user", reason=body.reason)
-    invocation_id = result.pop("_invocation_id", "")
+    invocation_id, result = await _execute_tool(
+        body.tool, body.args, source="user", reason=body.reason,
+    )
     error = result.get("error")
 
     return InvokeResponse(
@@ -410,7 +425,9 @@ async def _spawn_invocation(
             except Exception:  # noqa: BLE001
                 log.exception("failed to record crash for invocation %s", inv_id)
 
-    asyncio.create_task(_runner())
+    task = asyncio.create_task(_runner())
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
     return inv_id
 
 
@@ -424,8 +441,11 @@ async def _execute_tool(
     parent_invocation_id: str | None = None,
     fire_id: str | None = None,
     _existing_invocation_id: str | None = None,
-) -> dict:
+) -> tuple[str, dict]:
     """Core tool execution logic used by API, scheduler, chat, and tool-side API.
+
+    Returns ``(invocation_id, result_dict)``. The invocation_id is always a
+    real row id; the result is the tool's output (or ``{"error": ...}``).
 
     When `_existing_invocation_id` is set, the function takes over a row that
     `_spawn_invocation` pre-inserted: skips both the row-creation step and the
@@ -438,7 +458,10 @@ async def _execute_tool(
     # Look up tool
     rows = await db.execute_fetchall("SELECT * FROM tools WHERE name = ?", (tool_name,))
     if not rows:
-        return {"error": f"Tool '{tool_name}' not found", "_invocation_id": _existing_invocation_id or ""}
+        return (
+            _existing_invocation_id or "",
+            {"error": f"Tool '{tool_name}' not found"},
+        )
     tool = dict(rows[0])
 
     # Load manifest + input schema from the latest version.
@@ -514,7 +537,7 @@ async def _execute_tool(
             "parent_invocation_id": parent_invocation_id,
             "finished_at": now, "error": validation_error, "result": None,
         })
-        return {"error": validation_error, "_invocation_id": inv_id}
+        return inv_id, {"error": validation_error}
 
     if _existing_invocation_id is None:
         await db.execute(
@@ -616,5 +639,4 @@ async def _execute_tool(
         "result": result if not error else None,
     })
 
-    result["_invocation_id"] = inv_id
-    return result
+    return inv_id, result

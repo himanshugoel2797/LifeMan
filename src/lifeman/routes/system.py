@@ -282,7 +282,8 @@ async def download_client_update(platform: str, _: str = Depends(require_auth)):
 async def current_session(_: str = Depends(require_auth)):
     db = await get_db()
     rows = await db.execute_fetchall(
-        "SELECT * FROM sessions ORDER BY started_at DESC LIMIT 1"
+        "SELECT * FROM sessions WHERE archived_at IS NULL "
+        "ORDER BY last_message_at DESC LIMIT 1"
     )
     if not rows:
         return {"id": None, "surface": None}
@@ -290,7 +291,10 @@ async def current_session(_: str = Depends(require_auth)):
     return Session(
         id=r["id"],
         surface=r["surface"],
+        title=r.get("title") or "",
+        external_id=r.get("external_id"),
         started_at=r["started_at"],
         last_message_at=r["last_message_at"],
         message_count=r["message_count"],
+        archived_at=r.get("archived_at"),
     )

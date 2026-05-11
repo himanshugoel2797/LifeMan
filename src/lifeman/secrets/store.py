@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
@@ -190,24 +189,12 @@ async def get_secret_for_tool(
         return await _decrypt_and_log(name, row, accessor, reason, "standing_grant")
 
     # Ask the user.
-    from lifeman.permissions_runtime import await_permission
-    from lifeman.sse import bus
+    from lifeman.permissions_runtime import await_permission, create_permission_request
 
-    pid = str(uuid.uuid4())[:12]
-    now = datetime.now(timezone.utc).isoformat()
-    await db.execute(
-        """INSERT INTO permission_requests
-             (id, requester, capability, scope_json, reason, status,
-              requested_at, invocation_id)
-           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
-        (pid, accessor, cap, json.dumps({"secret": name}), reason, now, invocation_id),
-    )
-    await db.commit()
-    await bus.publish("permission_requested", {
-        "id": pid, "capability": cap, "from": tool_name,
-    })
-    await audit.log(
-        source=accessor, action="request_permission", target=cap, reason=reason,
+    pid = await create_permission_request(
+        requester=accessor, capability=cap,
+        scope={"secret": name}, reason=reason,
+        invocation_id=invocation_id,
     )
     status = await await_permission(pid, timeout=permission_timeout)
     if status not in ("granted_once", "granted_always"):

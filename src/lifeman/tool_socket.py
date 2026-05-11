@@ -17,14 +17,17 @@ import logging
 import os
 import shutil
 import tempfile
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from lifeman import audit
 from lifeman.db import get_db
-from lifeman.permissions_runtime import await_permission, find_matching_grant
+from lifeman.permissions_runtime import (
+    await_permission,
+    create_permission_request,
+    find_matching_grant,
+)
 from lifeman.sse import bus
 
 log = logging.getLogger("lifeman.tool_socket")
@@ -151,7 +154,7 @@ class ToolSocket:
                     "permission_required": True,
                     "capability": f"invoke:{target}",
                 }}
-            result = await _execute_tool(
+            _, result = await _execute_tool(
                 target,
                 params.get("args") or {},
                 source="tool",
@@ -159,7 +162,6 @@ class ToolSocket:
                 parent_invocation_id=self.invocation_id,
                 session_id=self.session_id,
             )
-            result.pop("_invocation_id", None)
             return {"result": result}
 
         if method == "notify":
@@ -230,33 +232,14 @@ class ToolSocket:
             return {"result": res}
 
         if method == "request_permission":
-            db = await get_db()
-            pid = str(uuid.uuid4())[:12]
-            now = datetime.now(timezone.utc).isoformat()
             cap = params.get("capability", "")
             reason = params.get("reason", "")
-            scope = params.get("scope") or {}
-            await db.execute(
-                """INSERT INTO permission_requests
-                   (id, requester, capability, scope_json, reason, status, requested_at, invocation_id)
-                   VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
-                (
-                    pid,
-                    f"tool:{self.tool_name}",
-                    cap,
-                    json.dumps(scope),
-                    reason,
-                    now,
-                    self.invocation_id,
-                ),
-            )
-            await db.commit()
-            await bus.publish("permission_requested", {"id": pid, "capability": cap, "from": self.tool_name})
-            await audit.log(
-                source=f"tool:{self.tool_name}",
-                action="request_permission",
-                target=cap,
+            pid = await create_permission_request(
+                requester=f"tool:{self.tool_name}",
+                capability=cap,
+                scope=params.get("scope") or {},
                 reason=reason,
+                invocation_id=self.invocation_id,
             )
             timeout = float(params.get("timeout", 120.0))
             status = await await_permission(pid, timeout=timeout)
@@ -556,22 +539,10 @@ class ToolSocket:
         grantee = f"tool:{self.tool_name}"
         if await find_matching_grant(grantee, capability, request_scope):
             return True
-        db = await get_db()
-        pid = str(uuid.uuid4())[:12]
-        now = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            """INSERT INTO permission_requests
-               (id, requester, capability, scope_json, reason, status, requested_at, invocation_id)
-               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
-            (pid, grantee, capability, json.dumps(request_scope), reason, now, self.invocation_id),
-        )
-        await db.commit()
-        await bus.publish("permission_requested", {"id": pid, "capability": capability, "from": self.tool_name})
-        await audit.log(
-            source=grantee,
-            action="request_permission",
-            target=capability,
-            reason=reason,
+        pid = await create_permission_request(
+            requester=grantee, capability=capability,
+            scope=request_scope, reason=reason,
+            invocation_id=self.invocation_id,
         )
         status = await await_permission(pid, timeout=timeout)
         return status in ("granted_once", "granted_always")
@@ -589,25 +560,17 @@ class ToolSocket:
         The request scope carries the actual `args` so grants like
         `args_match: {dry_run: true}` are checked against the real call.
         """
-        db = await get_db()
         cap = f"invoke:{target}"
         grantee = f"tool:{self.tool_name}"
         request_scope = {"target": target, "args": args if isinstance(args, dict) else {}}
         if await find_matching_grant(grantee, cap, request_scope):
             return True
-        # No standing grant — request one and wait for the user. Persist the
-        # actual args alongside the target so the resolve UI can see what's
-        # being granted and offer to scope the grant to those args.
-        pid = str(uuid.uuid4())[:12]
-        now = datetime.now(timezone.utc).isoformat()
-        scope_json = json.dumps(request_scope)
-        await db.execute(
-            """INSERT INTO permission_requests
-               (id, requester, capability, scope_json, reason, status, requested_at, invocation_id)
-               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
-            (pid, grantee, cap, scope_json, reason, now, self.invocation_id),
+        # Persist the actual args alongside the target so the resolve UI can
+        # see what's being granted and offer to scope the grant to those args.
+        pid = await create_permission_request(
+            requester=grantee, capability=cap,
+            scope=request_scope, reason=reason,
+            invocation_id=self.invocation_id,
         )
-        await db.commit()
-        await bus.publish("permission_requested", {"id": pid, "capability": cap, "from": self.tool_name})
         status = await await_permission(pid, timeout=120.0)
         return status in ("granted_once", "granted_always")

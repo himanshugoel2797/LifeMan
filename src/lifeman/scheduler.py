@@ -156,7 +156,7 @@ async def _fire(schedule: dict) -> None:
     await bus.publish("schedule_fired", {"id": schedule_id, "tool": tool_name, "fire_id": fire_id})
 
     # Execute the tool
-    result = await _execute_tool(
+    _, result = await _execute_tool(
         tool_name, args, source="schedule", schedule_id=schedule_id, fire_id=fire_id,
     )
 

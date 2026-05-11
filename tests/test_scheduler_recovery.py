@@ -54,7 +54,7 @@ async def test_crashed_mid_run_then_tick_actually_refires(temp_db, monkeypatch):
 
     async def fake_execute(tool, args, **kw):
         fired.append(tool)
-        return {"ok": True}
+        return ("inv-test", {"ok": True})
 
     import lifeman.routes.tools as tools_mod
     monkeypatch.setattr(tools_mod, "_execute_tool", fake_execute)
@@ -92,7 +92,7 @@ async def test_crashed_recurring_refires_once_and_advances(temp_db, monkeypatch)
 
     async def fake_execute(tool, args, **kw):
         calls.append(tool)
-        return {"ok": True}
+        return ("inv-test", {"ok": True})
 
     import lifeman.routes.tools as tools_mod
     monkeypatch.setattr(tools_mod, "_execute_tool", fake_execute)
@@ -135,7 +135,7 @@ async def test_very_overdue_recurring_fires_once_no_backfill(temp_db, monkeypatc
 
     async def fake_execute(tool, args, **kw):
         calls.append(tool)
-        return {"ok": True}
+        return ("inv-test", {"ok": True})
 
     import lifeman.routes.tools as tools_mod
     monkeypatch.setattr(tools_mod, "_execute_tool", fake_execute)
@@ -169,7 +169,7 @@ async def test_malformed_when_spec_does_not_crash_tick(temp_db, monkeypatch):
 
     async def fake_execute(tool, args, **kw):
         calls.append(tool)
-        return {"ok": True}
+        return ("inv-test", {"ok": True})
 
     import lifeman.routes.tools as tools_mod
     monkeypatch.setattr(tools_mod, "_execute_tool", fake_execute)
@@ -215,7 +215,7 @@ async def test_tool_outruns_tick_interval_no_double_fire(temp_db, monkeypatch):
         fired.append(tool)
         started_evt.set()
         await release_evt.wait()
-        return {"ok": True}
+        return ("inv-test", {"ok": True})
 
     import lifeman.routes.tools as tools_mod
     monkeypatch.setattr(tools_mod, "_execute_tool", slow_execute)

@@ -46,6 +46,11 @@ log = logging.getLogger(__name__)
 # pid -> (event, [latest_status])
 _waiters: dict[str, tuple[asyncio.Event, list[str]]] = {}
 
+# How long a pre-notification stays in `_waiters` before being garbage-
+# collected. 30 seconds is plenty for a same-loop awaiter to arrive and well
+# under any reasonable permission-request lifecycle.
+_ORPHAN_NOTIFY_TTL_SECONDS = 30.0
+
 
 def _slot(pid: str) -> tuple[asyncio.Event, list[str]]:
     if pid not in _waiters:
@@ -61,6 +66,20 @@ async def await_permission(pid: str, timeout: float = 120.0) -> str:
     DB row remains pending so the user can still resolve it later for audit).
     """
     event, status_box = _slot(pid)
+    # Race-defence: the request row is inserted and committed *before* we
+    # reach this function, so the user could resolve it in the window between
+    # the insert's commit and the line above creating the slot. Check the DB
+    # once up front and skip the wait if it's already terminal.
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT status FROM permission_requests WHERE id = ?", (pid,)
+    )
+    if rows:
+        current = dict(rows[0])["status"] or "pending"
+        if current != "pending":
+            _waiters.pop(pid, None)
+            return current
+
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -72,7 +91,6 @@ async def await_permission(pid: str, timeout: float = 120.0) -> str:
         return status_box[0]
 
     # Fallback: re-read the DB in case we missed the notify_resolved hook.
-    db = await get_db()
     rows = await db.execute_fetchall(
         "SELECT status FROM permission_requests WHERE id = ?", (pid,)
     )
@@ -82,10 +100,24 @@ async def await_permission(pid: str, timeout: float = 120.0) -> str:
 
 
 def notify_resolved(pid: str, status: str) -> None:
-    """Wake up the awaiter for `pid` with the resolution status."""
+    """Wake up the awaiter for `pid` with the resolution status.
+
+    Creates the slot if it doesn't exist yet, so a `notify_resolved` that
+    races ahead of `await_permission` still delivers the status (the waiter
+    will pick it up when it arrives). The pre-allocated slot is reclaimed
+    either by the eventual `await_permission` or by `_gc_orphaned_notifications`.
+    """
     event, status_box = _slot(pid)
     status_box[0] = status
     event.set()
+    # If no awaiter ever arrives (the caller already timed out, or the
+    # request was a no-op), schedule a cleanup so `_waiters` doesn't
+    # accumulate forever.
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.call_later(_ORPHAN_NOTIFY_TTL_SECONDS, _waiters.pop, pid, None)
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +233,46 @@ def grant_expires_at(scope: dict) -> str | None:
     if not isinstance(raw, str):
         return None
     return raw
+
+
+async def create_permission_request(
+    *,
+    requester: str,
+    capability: str,
+    scope: dict | None = None,
+    reason: str = "",
+    invocation_id: str | None = None,
+) -> str:
+    """Insert a pending permission_requests row and publish the request.
+
+    The single chokepoint every internal caller goes through (tool_socket,
+    chat_tools, secrets, internal API). Returns the new request id. Pair with
+    `await_permission(id)` to block on user resolution.
+    """
+    import json as _json
+    import uuid as _uuid
+    from lifeman import audit as _audit
+    from lifeman.sse import bus as _bus
+
+    db = await get_db()
+    pid = str(_uuid.uuid4())[:12]
+    now = datetime.now(timezone.utc).isoformat()
+    await db.execute(
+        """INSERT INTO permission_requests
+             (id, requester, capability, scope_json, reason, status,
+              requested_at, invocation_id)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+        (pid, requester, capability, _json.dumps(scope or {}), reason, now, invocation_id),
+    )
+    await db.commit()
+    await _bus.publish("permission_requested", {
+        "id": pid, "capability": capability, "from": requester,
+    })
+    await _audit.log(
+        source=requester, action="request_permission",
+        target=capability, reason=reason,
+    )
+    return pid
 
 
 async def find_matching_grant(
