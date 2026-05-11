@@ -39,22 +39,13 @@ async def _decide_route(event):
     runtime — install a tool with `manifest.role = "output_router"` and the next
     `emit_output` will use it.
     """
-    state = await _user_state()
+    from lifeman.user_state import get_state
+    state = await get_state()
     router_tool = await tool_backed.find_router_tool()
     if router_tool is None:
         return await route(event, user_state=state)
     channels = await tool_backed.all_available_channels()
     return await tool_backed.route_via_tool(router_tool, event, state, channels)
-
-
-async def _user_state() -> dict:
-    """Snapshot of state flags consulted by the router.
-
-    Phase-1 placeholder: only do_not_disturb (read from a future user
-    settings table). Returns an empty dict for now so the default rules
-    behave predictably.
-    """
-    return {}
 
 
 async def emit_output(

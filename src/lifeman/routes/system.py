@@ -278,6 +278,19 @@ async def download_client_update(platform: str, _: str = Depends(require_auth)):
     )
 
 
+@router.post("/system/ambient/tick")
+async def force_ambient_tick(_: str = Depends(require_auth)):
+    """Fire an ambient cycle immediately and return its summary.
+
+    Useful both for testing and for the user to manually nudge the system
+    ("hey, look around now") without waiting for the next scheduled tick.
+    Honours user_state — a do-not-disturb flag still skips the tick.
+    """
+    from lifeman import ambient
+    summary = await ambient.run_one_cycle()
+    return summary
+
+
 @router.get("/sessions/current")
 async def current_session(_: str = Depends(require_auth)):
     db = await get_db()

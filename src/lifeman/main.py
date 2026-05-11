@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from lifeman.config import settings
 from lifeman.db import get_db, close_db
-from lifeman import backup, ollama_supervisor, scheduler
+from lifeman import ambient, backup, ollama_supervisor, scheduler
 from lifeman.routes import api_router, ui_router
 
 logging.basicConfig(
@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
     log.info("Scheduler started")
 
     await backup.start_scheduled_backups()
+    await ambient.start()
 
     # If the master key was just generated this boot, surface a one-time
     # output event so the user actually notices (the log warning alone is
@@ -92,6 +93,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    await ambient.stop()
     await backup.stop_scheduled_backups()
     await scheduler.stop()
     await ollama_supervisor.stop()
