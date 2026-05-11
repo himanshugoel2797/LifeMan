@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import jsonschema
@@ -453,40 +454,26 @@ async def _spawn_invocation(
     return inv_id
 
 
-async def _execute_tool(
-    tool_name: str,
-    args: dict,
-    source: str = "user",
-    reason: str = "",
-    schedule_id: str | None = None,
-    session_id: str | None = None,
-    parent_invocation_id: str | None = None,
-    fire_id: str | None = None,
-    _existing_invocation_id: str | None = None,
-) -> tuple[str, dict]:
-    """Core tool execution logic used by API, scheduler, chat, and tool-side API.
+@dataclass(frozen=True)
+class _ToolManifestParams:
+    """The narrow slice of manifest data `_execute_tool` actually consumes."""
+    tool_row: dict
+    timeout: float
+    network_hosts: list[str]
+    schema_input: dict
 
-    Returns ``(invocation_id, result_dict)``. The invocation_id is always a
-    real row id; the result is the tool's output (or ``{"error": ...}``).
 
-    When `_existing_invocation_id` is set, the function takes over a row that
-    `_spawn_invocation` pre-inserted: skips both the row-creation step and the
-    `invocation_started` SSE publish, then updates the same row when it
-    finishes. Validation failures still record an error transition on that
-    row so async callers see the same shape as sync ones.
-    """
-    db = await get_db()
-
-    # Look up tool
-    rows = await db.execute_fetchall("SELECT * FROM tools WHERE name = ?", (tool_name,))
+async def _load_tool_and_manifest(
+    db, tool_name: str,
+) -> _ToolManifestParams | None:
+    """Fetch the tool row + latest manifest. Returns None if the tool is unknown."""
+    rows = await db.execute_fetchall(
+        "SELECT * FROM tools WHERE name = ?", (tool_name,),
+    )
     if not rows:
-        return (
-            _existing_invocation_id or "",
-            {"error": f"Tool '{tool_name}' not found"},
-        )
+        return None
     tool = dict(rows[0])
 
-    # Load manifest + input schema from the latest version.
     timeout = 30.0
     network_hosts: list[str] = []
     schema_input: dict = {}
@@ -505,63 +492,107 @@ async def _execute_tool(
             schema_input = json.loads(manifest_rows[0]["schema_input_json"] or "{}")
         except json.JSONDecodeError:
             schema_input = {}
+    return _ToolManifestParams(
+        tool_row=tool, timeout=timeout,
+        network_hosts=network_hosts, schema_input=schema_input,
+    )
 
-    # Validate args BEFORE creating the invocation row, so a bad-args call
-    # doesn't leave an orphaned `running` row or fire a misleading start event.
-    validation_error: str | None = None
-    if isinstance(schema_input, dict) and schema_input:
-        try:
-            jsonschema.validate(instance=args, schema=schema_input)
-        except jsonschema.ValidationError as e:
-            path = "/".join(str(p) for p in e.absolute_path) or "(root)"
-            validation_error = f"args failed schema_input at {path}: {e.message}"
-        except jsonschema.SchemaError as e:
-            validation_error = f"schema_input itself is invalid: {e.message}"
 
-    # Create invocation record. If validation failed, record it as a finished
-    # error in a single INSERT so observers never see a transient `running`.
-    # When called from `_spawn_invocation`, a row already exists — reuse it.
-    inv_id = _existing_invocation_id or str(uuid.uuid4())[:12]
+def _validate_args(args: dict, schema_input: dict) -> str | None:
+    """Validate `args` against the tool's input schema. Returns an error string
+    if validation fails, None if it passes (or the schema is empty)."""
+    if not (isinstance(schema_input, dict) and schema_input):
+        return None
+    try:
+        jsonschema.validate(instance=args, schema=schema_input)
+    except jsonschema.ValidationError as e:
+        path = "/".join(str(p) for p in e.absolute_path) or "(root)"
+        return f"args failed schema_input at {path}: {e.message}"
+    except jsonschema.SchemaError as e:
+        return f"schema_input itself is invalid: {e.message}"
+    return None
+
+
+async def _publish_invocation_completed(
+    *, inv_id: str, tool_name: str, source: str, status: str,
+    session_id: str | None, schedule_id: str | None,
+    parent_invocation_id: str | None,
+    finished_at: str, error: str | None, result: dict | None,
+) -> None:
+    """Single emit point for invocation_completed so the SSE shape stays in sync
+    between the validation-failure and happy paths."""
+    await bus.publish("invocation_completed", {
+        "id": inv_id, "tool": tool_name, "source": source, "status": status,
+        "session_id": session_id, "schedule_id": schedule_id,
+        "parent_invocation_id": parent_invocation_id,
+        "finished_at": finished_at,
+        "error": error,
+        "result": result if not error else None,
+    })
+
+
+async def _record_validation_failure(
+    db, *, inv_id: str, existing_invocation_id: str | None,
+    tool_name: str, args: dict, source: str, reason: str,
+    schedule_id: str | None, session_id: str | None,
+    parent_invocation_id: str | None,
+    validation_error: str,
+) -> None:
+    """Persist a finished-error invocation row, audit, and publish completion.
+
+    Handles both shapes: an existing pre-inserted `running` row (from
+    `_spawn_invocation`) is updated in place; otherwise a new row is inserted
+    finished+error in a single statement so observers never see a transient
+    `running` state.
+    """
     now = datetime.now(timezone.utc).isoformat()
-    if validation_error is not None:
-        if _existing_invocation_id is not None:
-            await db.execute(
-                """UPDATE invocations
-                     SET error = ?, finished_at = ?, status = 'error',
-                         result_json = ?
-                   WHERE id = ?""",
-                (validation_error, now,
-                 json.dumps({"error": validation_error}), inv_id),
-            )
-        else:
-            await db.execute(
-                """INSERT INTO invocations
-                   (id, tool, args_json, source, started_at, finished_at,
-                    schedule_id, session_id, parent_invocation_id, reason,
-                    status, error, result_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'error', ?, ?)""",
-                (
-                    inv_id, tool_name, json.dumps(args), source, now, now,
-                    schedule_id, session_id, parent_invocation_id, reason,
-                    validation_error, json.dumps({"error": validation_error}),
-                ),
-            )
-        await db.commit()
-        await audit.log(
-            source=source, action="invoke_tool", target=tool_name,
-            args_summary=json.dumps(args)[:200],
-            result_summary=validation_error[:200],
-            reason=reason,
+    err_json = json.dumps({"error": validation_error})
+    if existing_invocation_id is not None:
+        await db.execute(
+            """UPDATE invocations
+                 SET error = ?, finished_at = ?, status = 'error',
+                     result_json = ?
+               WHERE id = ?""",
+            (validation_error, now, err_json, inv_id),
         )
-        await bus.publish("invocation_completed", {
-            "id": inv_id, "tool": tool_name, "source": source, "status": "error",
-            "session_id": session_id, "schedule_id": schedule_id,
-            "parent_invocation_id": parent_invocation_id,
-            "finished_at": now, "error": validation_error, "result": None,
-        })
-        return inv_id, {"error": validation_error}
+    else:
+        await db.execute(
+            """INSERT INTO invocations
+               (id, tool, args_json, source, started_at, finished_at,
+                schedule_id, session_id, parent_invocation_id, reason,
+                status, error, result_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'error', ?, ?)""",
+            (
+                inv_id, tool_name, json.dumps(args), source, now, now,
+                schedule_id, session_id, parent_invocation_id, reason,
+                validation_error, err_json,
+            ),
+        )
+    await db.commit()
+    await audit.log(
+        source=source, action="invoke_tool", target=tool_name,
+        args_summary=json.dumps(args)[:200],
+        result_summary=validation_error[:200],
+        reason=reason,
+    )
+    await _publish_invocation_completed(
+        inv_id=inv_id, tool_name=tool_name, source=source, status="error",
+        session_id=session_id, schedule_id=schedule_id,
+        parent_invocation_id=parent_invocation_id,
+        finished_at=now, error=validation_error, result=None,
+    )
 
-    if _existing_invocation_id is None:
+
+async def _start_invocation_row(
+    db, *, inv_id: str, existing_invocation_id: str | None,
+    tool_name: str, args: dict, source: str, reason: str,
+    schedule_id: str | None, session_id: str | None,
+    parent_invocation_id: str | None,
+) -> None:
+    """Either insert a fresh `running` row + publish, or backfill schedule_id
+    on a pre-inserted row from `_spawn_invocation`."""
+    if existing_invocation_id is None:
+        now = datetime.now(timezone.utc).isoformat()
         await db.execute(
             """INSERT INTO invocations
                (id, tool, args_json, source, started_at, schedule_id, session_id,
@@ -587,79 +618,163 @@ async def _execute_tool(
         )
         await db.commit()
 
-    # Run in sandbox, behind a per-invocation tool-side API socket.
-    tool_dir = settings.get_tools_dir() / tool["id"]
-    outputs_emitted = 0
+
+async def _run_in_sandbox(
+    *, inv_id: str, tool_name: str, tool_id: str, source: str,
+    session_id: str | None, args: dict,
+    timeout: float, network_hosts: list[str], fire_id: str | None,
+) -> tuple[dict, int]:
+    """Run the tool inside a sandbox with a per-invocation socket. Returns
+    `(result, outputs_emitted_count)`. The count is how many user-visible
+    outputs the tool itself emitted via the socket — used to decide whether
+    to auto-emit a completion event."""
+    tool_dir = settings.get_tools_dir() / tool_id
     if not (tool_dir / "run.py").exists():
-        result = {"error": "Tool code not found on disk"}
-    else:
-        async with ToolSocket(
-            invocation_id=inv_id,
-            tool_name=tool_name,
-            source=source,
-            session_id=session_id,
-        ) as ts:
-            result = await run_tool(
-                tool_dir, args, timeout=timeout,
-                socket_path=str(ts.socket_path),
-                network_hosts=network_hosts,
-                fire_id=fire_id,
-            )
-            outputs_emitted = ts.outputs_emitted
+        return {"error": "Tool code not found on disk"}, 0
+    async with ToolSocket(
+        invocation_id=inv_id, tool_name=tool_name,
+        source=source, session_id=session_id,
+    ) as ts:
+        result = await run_tool(
+            tool_dir, args, timeout=timeout,
+            socket_path=str(ts.socket_path),
+            network_hosts=network_hosts, fire_id=fire_id,
+        )
+        return result, ts.outputs_emitted
 
-    # Auto-emit a completion output for human-facing invocations that didn't
-    # surface anything themselves. Without this, a tool that just returns a
-    # dict (e.g. {"greeting": "hello"}) is invisible — the result lives on the
-    # invocation detail page but never reaches a notification channel.
-    # Fires for `user` (manual UI/API invokes) and `schedule:*` (scheduled
-    # fires the user explicitly set up); tool-to-tool calls stay quiet.
-    auto_emit = source == "user" or source == "schedule"
-    if auto_emit and outputs_emitted == 0 and not result.get("error"):
-        try:
-            from lifeman.outputs import emit_output
-            from lifeman.outputs.models import StructuredContent
 
-            body = json.dumps(result, default=str)
-            if len(body) > 400:
-                body = body[:397] + "..."
-            await emit_output(
-                content=StructuredContent(title=tool_name, body=body),
-                category="completion",
-                urgency="soft",
-                reason=f"auto: invocation {inv_id} returned no output",
-                source_tool=f"tool:{tool_name}",
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("auto-emit completion output failed for %s", inv_id)
+async def _maybe_auto_emit_completion(
+    *, source: str, outputs_emitted: int, result: dict,
+    tool_name: str, inv_id: str,
+) -> None:
+    """Synthesise a completion output for human-triggered invocations that
+    didn't surface anything themselves. Without this, a tool that just returns
+    a dict is invisible — the result lives on the invocation detail page but
+    never reaches a notification channel. Fires for `user` and `schedule`
+    sources; tool-to-tool calls stay quiet."""
+    if source not in ("user", "schedule"):
+        return
+    if outputs_emitted > 0 or result.get("error"):
+        return
+    try:
+        from lifeman.outputs import emit_output
+        from lifeman.outputs.models import StructuredContent
 
-    # Update invocation
+        body = json.dumps(result, default=str)
+        if len(body) > 400:
+            body = body[:397] + "..."
+        await emit_output(
+            content=StructuredContent(title=tool_name, body=body),
+            category="completion",
+            urgency="soft",
+            reason=f"auto: invocation {inv_id} returned no output",
+            source_tool=f"tool:{tool_name}",
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("auto-emit completion output failed for %s", inv_id)
+
+
+async def _finalize_invocation(
+    db, *, inv_id: str, tool_name: str, source: str, reason: str,
+    args: dict, result: dict, schedule_id: str | None,
+    session_id: str | None, parent_invocation_id: str | None,
+) -> None:
+    """Write the terminal row state, audit, and publish completion."""
     finished = datetime.now(timezone.utc).isoformat()
     error = result.get("error")
     status = "error" if error else "ok"
-    stored_result_json = _cap_result_json(result)
     await db.execute(
-        "UPDATE invocations SET result_json = ?, error = ?, finished_at = ?, status = ? WHERE id = ?",
-        (stored_result_json, error, finished, status, inv_id),
+        "UPDATE invocations SET result_json = ?, error = ?, finished_at = ?, "
+        "status = ? WHERE id = ?",
+        (_cap_result_json(result), error, finished, status, inv_id),
     )
     await db.commit()
-
-    # Audit
     await audit.log(
-        source=source,
-        action="invoke_tool",
-        target=tool_name,
+        source=source, action="invoke_tool", target=tool_name,
         args_summary=json.dumps(args)[:200],
         result_summary=json.dumps(result)[:200] if result else "",
         reason=reason,
     )
+    await _publish_invocation_completed(
+        inv_id=inv_id, tool_name=tool_name, source=source, status=status,
+        session_id=session_id, schedule_id=schedule_id,
+        parent_invocation_id=parent_invocation_id,
+        finished_at=finished, error=error, result=result,
+    )
 
-    await bus.publish("invocation_completed", {
-        "id": inv_id, "tool": tool_name, "source": source, "status": status,
-        "session_id": session_id, "schedule_id": schedule_id,
-        "parent_invocation_id": parent_invocation_id,
-        "finished_at": finished,
-        "error": error,
-        "result": result if not error else None,
-    })
+
+async def _execute_tool(
+    tool_name: str,
+    args: dict,
+    source: str = "user",
+    reason: str = "",
+    schedule_id: str | None = None,
+    session_id: str | None = None,
+    parent_invocation_id: str | None = None,
+    fire_id: str | None = None,
+    _existing_invocation_id: str | None = None,
+) -> tuple[str, dict]:
+    """Core tool execution logic used by API, scheduler, chat, and tool-side API.
+
+    Returns ``(invocation_id, result_dict)``. The invocation_id is always a
+    real row id; the result is the tool's output (or ``{"error": ...}``).
+
+    When `_existing_invocation_id` is set, the function takes over a row that
+    `_spawn_invocation` pre-inserted: skips the row-creation step and the
+    `invocation_started` SSE publish, then updates the same row when it
+    finishes. Validation failures still record an error transition on that
+    row so async callers see the same shape as sync ones.
+
+    The phases below correspond to small private helpers — keep this function
+    a thin orchestration layer so each step stays independently testable.
+    """
+    db = await get_db()
+
+    params = await _load_tool_and_manifest(db, tool_name)
+    if params is None:
+        return (
+            _existing_invocation_id or "",
+            {"error": f"Tool '{tool_name}' not found"},
+        )
+
+    inv_id = _existing_invocation_id or str(uuid.uuid4())[:12]
+
+    validation_error = _validate_args(args, params.schema_input)
+    if validation_error is not None:
+        await _record_validation_failure(
+            db, inv_id=inv_id,
+            existing_invocation_id=_existing_invocation_id,
+            tool_name=tool_name, args=args, source=source, reason=reason,
+            schedule_id=schedule_id, session_id=session_id,
+            parent_invocation_id=parent_invocation_id,
+            validation_error=validation_error,
+        )
+        return inv_id, {"error": validation_error}
+
+    await _start_invocation_row(
+        db, inv_id=inv_id,
+        existing_invocation_id=_existing_invocation_id,
+        tool_name=tool_name, args=args, source=source, reason=reason,
+        schedule_id=schedule_id, session_id=session_id,
+        parent_invocation_id=parent_invocation_id,
+    )
+
+    result, outputs_emitted = await _run_in_sandbox(
+        inv_id=inv_id, tool_name=tool_name, tool_id=params.tool_row["id"],
+        source=source, session_id=session_id, args=args,
+        timeout=params.timeout, network_hosts=params.network_hosts,
+        fire_id=fire_id,
+    )
+
+    await _maybe_auto_emit_completion(
+        source=source, outputs_emitted=outputs_emitted, result=result,
+        tool_name=tool_name, inv_id=inv_id,
+    )
+
+    await _finalize_invocation(
+        db, inv_id=inv_id, tool_name=tool_name, source=source, reason=reason,
+        args=args, result=result, schedule_id=schedule_id,
+        session_id=session_id, parent_invocation_id=parent_invocation_id,
+    )
 
     return inv_id, result
