@@ -89,10 +89,53 @@ async def query_audit(
 
 @router.get("/user/status", response_model=UserStatus)
 async def user_status(_: str = Depends(require_auth)):
+    """Composite user state: derives ``available`` from the live
+    ``do_not_disturb`` / ``asleep`` providers so any caller (clients,
+    the LLM) reads the same view the router uses."""
+    from lifeman.user_state import get_state
+    state = await get_state()
+    available = not (state.get("do_not_disturb") or state.get("asleep"))
     return UserStatus(
-        available=True,
+        available=available,
         last_active=datetime.now(timezone.utc).isoformat(),
+        do_not_disturb=bool(state.get("do_not_disturb", False)),
     )
+
+
+@router.get("/user/state")
+async def user_state_route(_: str = Depends(require_auth)):
+    """Raw state dict as the router sees it. Useful for debugging which
+    provider is responsible for a given decision."""
+    from lifeman.user_state import get_state
+    return await get_state()
+
+
+@router.get("/user/settings")
+async def list_user_settings(_: str = Depends(require_auth)):
+    from lifeman.user_settings import list_settings
+    return await list_settings()
+
+
+class _SettingBody(BaseModel):
+    value: object
+
+
+@router.put("/user/settings/{key}")
+async def put_user_setting(
+    key: str, body: _SettingBody, _: str = Depends(require_auth),
+):
+    from lifeman.user_settings import set_setting
+    await set_setting(key, body.value)
+    return {"ok": True, "key": key, "value": body.value}
+
+
+@router.delete("/user/settings/{key}")
+async def delete_user_setting(key: str, _: str = Depends(require_auth)):
+    from lifeman.user_settings import delete_setting
+    deleted = await delete_setting(key)
+    if not deleted:
+        raise HTTPException(404, f"no setting {key!r}")
+    return {"ok": True}
 
 
 @router.get("/now")

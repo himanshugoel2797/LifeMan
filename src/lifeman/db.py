@@ -537,6 +537,19 @@ _MIGRATIONS: list[tuple[int, str]] = [
         )
         """,
     ),
+    # User-controlled settings backing the context-awareness providers:
+    # do_not_disturb flag, sleep schedule, etc. JSON values so a new flag
+    # doesn't need a migration.
+    (
+        18,
+        """
+        CREATE TABLE IF NOT EXISTS user_settings (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 

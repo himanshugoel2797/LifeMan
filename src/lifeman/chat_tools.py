@@ -592,10 +592,17 @@ async def _handle_current_session(_: dict) -> dict:
 
 
 async def _handle_user_status(_: dict) -> dict:
+    """Composite user state from the user_state provider chain. Same view
+    the output router sees, so the LLM can decide whether to interrupt."""
+    from lifeman.user_state import get_state
+    state = await get_state()
     return {
-        "available": True,
+        "available": not (state.get("do_not_disturb") or state.get("asleep")),
         "last_active": datetime.now(timezone.utc).isoformat(),
-        "do_not_disturb": False,
+        "do_not_disturb": bool(state.get("do_not_disturb", False)),
+        "asleep": bool(state.get("asleep", False)),
+        "period": state.get("period"),
+        "weekday": state.get("weekday"),
     }
 
 

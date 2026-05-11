@@ -46,6 +46,9 @@ async def lifespan(app: FastAPI):
     install_memory_handlers()
     install_observation_handlers()
 
+    from lifeman.user_state import install_builtin_providers
+    install_builtin_providers()
+
     await ollama_supervisor.start()
 
     await scheduler.start()
