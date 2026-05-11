@@ -96,6 +96,58 @@ async def test_outputs_page_shows_proposals_section(http_client):
 
 
 @pytest.mark.asyncio
+async def test_inputs_page_filters_by_surface_prefix(http_client):
+    from lifeman.inputs import ingest_input
+    await ingest_input(surface="phone.sensor.accel", raw_payload="A", reason="t")
+    await ingest_input(surface="phone.sensor.gyro", raw_payload="B", reason="t")
+    await ingest_input(surface="chat", raw_payload="C", reason="t")
+
+    r = await http_client.get("/inputs")
+    assert r.status_code == 200, r.text
+    body = r.text
+    assert 'tag-accent">phone.sensor.accel<' in body
+    assert 'tag-accent">phone.sensor.gyro<' in body
+    assert 'tag-accent">chat<' in body
+
+    r = await http_client.get("/inputs?surface=phone.sensor")
+    body = r.text
+    assert 'tag-accent">phone.sensor.accel<' in body
+    assert 'tag-accent">phone.sensor.gyro<' in body
+    # chat surface filtered out of the rows
+    assert 'tag-accent">chat<' not in body
+    # The filter input round-trips its value
+    assert 'value="phone.sensor"' in body
+
+
+@pytest.mark.asyncio
+async def test_inputs_page_filters_by_intent_hint(http_client):
+    from lifeman.inputs import ingest_input
+    await ingest_input(
+        surface="api", raw_payload="{}", intent_hint="invoke", reason="t",
+    )
+    await ingest_input(surface="chat", raw_payload="hi", reason="t")
+
+    r = await http_client.get("/inputs?intent_hint=invoke")
+    body = r.text
+    assert 'tag-accent">api<' in body
+    # The chat row should be filtered out
+    assert 'tag-accent">chat<' not in body
+    assert 'value="invoke" selected' in body
+
+
+@pytest.mark.asyncio
+async def test_inputs_page_searches_raw_payload(http_client):
+    from lifeman.inputs import ingest_input
+    await ingest_input(surface="chat", raw_payload="apple pie", reason="t")
+    await ingest_input(surface="chat", raw_payload="banana split", reason="t")
+
+    r = await http_client.get("/inputs?q=apple")
+    body = r.text
+    assert "apple pie" in body
+    assert "banana split" not in body
+
+
+@pytest.mark.asyncio
 async def test_tool_detail_has_invoke_async_button(http_client):
     from lifeman import db as db_mod
     db = await db_mod.get_db()

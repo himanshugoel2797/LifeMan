@@ -373,17 +373,50 @@ async def observations_page(request: Request, level: str | None = None):
 
 
 @router.get("/inputs", response_class=HTMLResponse)
-async def inputs_page(request: Request):
+async def inputs_page(
+    request: Request,
+    surface: str | None = None,
+    source: str | None = None,
+    intent_hint: str | None = None,
+    q: str | None = None,
+):
     db = await get_db()
+    clauses: list[str] = []
+    params: list = []
+    if surface:
+        # Prefix match: surface names are hierarchical (phone.sensor.*),
+        # so "phone.sensor" should match every sub-surface under it.
+        clauses.append("surface LIKE ?")
+        params.append(surface + "%")
+    if source:
+        clauses.append("source = ?")
+        params.append(source)
+    if intent_hint:
+        if intent_hint == "__none__":
+            clauses.append("intent_hint IS NULL")
+        else:
+            clauses.append("intent_hint = ?")
+            params.append(intent_hint)
+    if q:
+        clauses.append("raw_payload LIKE ?")
+        params.append(f"%{q}%")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = await db.execute_fetchall(
-        "SELECT id, surface, raw_payload, intent_hint, source, sensitivity, "
-        "       reason, emitted_at FROM input_events "
-        "ORDER BY emitted_at DESC LIMIT 100"
+        f"SELECT id, surface, raw_payload, intent_hint, source, sensitivity, "
+        f"       reason, emitted_at FROM input_events {where} "
+        f"ORDER BY emitted_at DESC LIMIT 100",
+        tuple(params),
     )
     return templates.TemplateResponse(
         request,
         "inputs.html",
-        {"items": [dict(r) for r in rows]},
+        {
+            "items": [dict(r) for r in rows],
+            "surface_filter": surface or "",
+            "source_filter": source or "",
+            "intent_hint_filter": intent_hint or "",
+            "q_filter": q or "",
+        },
     )
 
 

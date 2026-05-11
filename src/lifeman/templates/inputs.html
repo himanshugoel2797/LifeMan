@@ -39,6 +39,35 @@
     </form>
 </details>
 
+<form class="filters" method="get" action="/inputs">
+    <label>
+        surface
+        <input type="text" name="surface" value="{{ surface_filter }}" placeholder="e.g. phone.sensor">
+    </label>
+    <label>
+        source
+        <input type="text" name="source" value="{{ source_filter }}" placeholder="e.g. user">
+    </label>
+    <label>
+        intent
+        <select name="intent_hint">
+            <option value="" {% if not intent_hint_filter %}selected{% endif %}>all</option>
+            <option value="invoke" {% if intent_hint_filter == 'invoke' %}selected{% endif %}>invoke</option>
+            <option value="chat" {% if intent_hint_filter == 'chat' %}selected{% endif %}>chat</option>
+            <option value="command" {% if intent_hint_filter == 'command' %}selected{% endif %}>command</option>
+            <option value="__none__" {% if intent_hint_filter == '__none__' %}selected{% endif %}>(none)</option>
+        </select>
+    </label>
+    <label>
+        search
+        <input type="text" name="q" value="{{ q_filter }}" placeholder="payload substring">
+    </label>
+    <button type="submit" class="btn">Apply</button>
+    {% if surface_filter or source_filter or intent_hint_filter or q_filter %}
+    <a class="btn" href="/inputs">Clear</a>
+    {% endif %}
+</form>
+
 <h2>Recent input events</h2>
 {% if items %}
 <table>
