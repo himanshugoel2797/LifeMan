@@ -461,3 +461,91 @@ async def test_audit_query_returns_recent_entries(http_client):
     r = await http_client.get("/api/audit", params={"action": "register_tool"})
     assert r.status_code == 200
     assert any(e["target"] == "audit_tool" for e in r.json())
+
+
+# ---------------------------------------------------------------------------
+# Client update manifest
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_client_updates_missing_manifest_returns_404(http_client):
+    r = await http_client.get("/api/system/client-updates/android")
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_client_updates_returns_published_manifest(http_client, tmp_path):
+    import json
+    from lifeman.config import settings
+    updates_dir = settings.data_dir / "client_updates"
+    updates_dir.mkdir(parents=True, exist_ok=True)
+    (updates_dir / "android.json").write_text(json.dumps({
+        "version": "1.4.0",
+        "sha256": "deadbeef" * 8,
+        "download_url": "https://example.invalid/Lifeman-1.4.0.apk",
+        "notes": "First public build.",
+    }))
+
+    r = await http_client.get("/api/system/client-updates/android")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["version"] == "1.4.0"
+    assert body["sha256"] == "deadbeef" * 8
+    assert body["download_url"].endswith(".apk")
+    assert body["notes"] == "First public build."
+
+
+@pytest.mark.asyncio
+async def test_client_updates_download_serves_local_binary(http_client):
+    import json
+    from lifeman.config import settings
+    updates_dir = settings.data_dir / "client_updates"
+    updates_dir.mkdir(parents=True, exist_ok=True)
+    (updates_dir / "Lifeman-1.4.0.apk").write_bytes(b"PK\x03\x04not-really-an-apk")
+    (updates_dir / "android.json").write_text(json.dumps({
+        "version": "1.4.0",
+        "sha256": "x",
+        "download_url": "/api/system/client-updates/android/download",
+        "local_filename": "Lifeman-1.4.0.apk",
+    }))
+
+    r = await http_client.get("/api/system/client-updates/android/download")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/octet-stream"
+    assert r.content == b"PK\x03\x04not-really-an-apk"
+
+
+@pytest.mark.asyncio
+async def test_client_updates_download_404_when_not_hosted_locally(http_client):
+    import json
+    from lifeman.config import settings
+    updates_dir = settings.data_dir / "client_updates"
+    updates_dir.mkdir(parents=True, exist_ok=True)
+    (updates_dir / "windows.json").write_text(json.dumps({
+        "version": "1.4.0",
+        "sha256": "x",
+        "download_url": "https://example.invalid/Lifeman-1.4.0-setup.exe",
+    }))
+    r = await http_client.get("/api/system/client-updates/windows/download")
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_client_updates_rejects_path_traversal(http_client):
+    import json
+    from lifeman.config import settings
+    updates_dir = settings.data_dir / "client_updates"
+    updates_dir.mkdir(parents=True, exist_ok=True)
+    (updates_dir / "android.json").write_text(json.dumps({
+        "version": "x", "sha256": "x", "download_url": "x",
+        "local_filename": "../../etc/passwd",
+    }))
+    r = await http_client.get("/api/system/client-updates/android/download")
+    assert r.status_code in (400, 404)
+
+    # Platform segment with traversal is rejected by FastAPI's path parser
+    # before our handler runs, but a single-segment ``..`` slips through and
+    # must be rejected by the regex.
+    r = await http_client.get("/api/system/client-updates/..")
+    assert r.status_code == 404

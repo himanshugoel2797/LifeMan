@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from lifeman import audit as audit_mod
 from lifeman import backup as backup_mod
 from lifeman.auth import require_auth
+from lifeman.config import settings
 from lifeman.db import get_db
 from lifeman.models import AuditEntry, OkResponse, Session, SystemStatus, UserStatus
 
@@ -176,6 +180,102 @@ async def restore_backup(body: RestoreRequest, _: str = Depends(require_auth)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return OkResponse()
+
+
+# ---------------------------------------------------------------------------
+# Client update manifest
+# ---------------------------------------------------------------------------
+#
+# The companion clients (Android, Windows) poll for new builds weekly per
+# CLIENT_DESIGN §"Distribution & updates". The kernel surfaces a per-platform
+# manifest from disk so the maintainer can publish a new build by dropping
+# one JSON file (and optionally a binary alongside it) into the client
+# updates directory — no kernel restart, no DB migration.
+#
+# Manifest layout under ``<data_dir>/client_updates/``::
+#
+#     android.json     ← {"version": "1.4.0", "sha256": "…", "download_url": "…",
+#                          "notes": "…", "local_filename": "Lifeman-1.4.0.apk"}
+#     windows.json     ← same shape
+#     Lifeman-1.4.0.apk
+#     Lifeman-1.4.0-setup.exe
+#
+# ``download_url`` is what the client follows. It may point at any static
+# host; if the maintainer wants the kernel to serve the bytes, set
+# ``local_filename`` and point ``download_url`` back at the
+# ``/api/system/client-updates/{platform}/download`` endpoint below.
+
+CLIENT_UPDATES_DIR = "client_updates"
+# Conservative whitelist: the client only sends ``windows`` and ``android``
+# today; reject anything that could traverse paths or pull from outside the
+# updates dir.
+_PLATFORM_RE = re.compile(r"^[a-z0-9_-]+$")
+
+
+def _client_updates_dir():
+    return settings.data_dir / CLIENT_UPDATES_DIR
+
+
+def _load_client_update_manifest(platform: str) -> dict:
+    """Return the manifest dict for ``platform`` or raise 404."""
+    if not _PLATFORM_RE.match(platform):
+        raise HTTPException(404, "no published build for this platform")
+    manifest_path = _client_updates_dir() / f"{platform}.json"
+    if not manifest_path.is_file():
+        raise HTTPException(404, "no published build for this platform")
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise HTTPException(500, f"client update manifest for {platform!r} is malformed: {e}")
+
+
+@router.get("/system/client-updates/{platform}")
+async def get_client_update(platform: str, _: str = Depends(require_auth)):
+    """Return the published client build manifest for ``platform``.
+
+    404 means "no published build for this platform" — the client treats
+    that as "no update available" and stays quiet.
+    """
+    manifest = _load_client_update_manifest(platform)
+    payload = {
+        "version": str(manifest.get("version", "")),
+        "sha256": str(manifest.get("sha256", "")),
+        "download_url": str(manifest.get("download_url", "")),
+    }
+    if manifest.get("notes"):
+        payload["notes"] = str(manifest["notes"])
+    return payload
+
+
+@router.get("/system/client-updates/{platform}/download")
+async def download_client_update(platform: str, _: str = Depends(require_auth)):
+    """Serve the binary for ``platform`` if the kernel is hosting it.
+
+    Optional — ``download_url`` in the manifest may point at any static
+    host. If the maintainer set ``local_filename`` on the manifest, the
+    bytes are served from ``<data_dir>/client_updates/<local_filename>``.
+    """
+    manifest = _load_client_update_manifest(platform)
+    local_filename = manifest.get("local_filename")
+    if not local_filename or not isinstance(local_filename, str):
+        raise HTTPException(404, "binary not hosted on this kernel")
+
+    base = _client_updates_dir().resolve()
+    binary_path = (base / local_filename).resolve()
+    # Guard against a manifest whose local_filename escapes the updates
+    # dir (e.g. ``../../etc/passwd``). The maintainer writes the manifest
+    # by hand, so this is belt-and-suspenders, but cheap to enforce.
+    try:
+        binary_path.relative_to(base)
+    except ValueError:
+        raise HTTPException(400, "manifest local_filename escapes client_updates dir")
+    if not binary_path.is_file():
+        raise HTTPException(404, "no binary file for this platform")
+    return FileResponse(
+        binary_path,
+        media_type="application/octet-stream",
+        filename=binary_path.name,
+    )
 
 
 @router.get("/sessions/current")
