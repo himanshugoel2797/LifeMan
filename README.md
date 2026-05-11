@@ -172,7 +172,7 @@ All settings can be set via environment variables prefixed with `LIFEMAN_`:
 | `LIFEMAN_BACKUP_INTERVAL_HOURS` | `24` | Hours between auto-backups (0 disables) |
 | `LIFEMAN_BACKUP_RETENTION_COUNT` | `14` | Keep the N most-recent encrypted snapshots |
 | `LIFEMAN_BACKUP_DIR` | `<data_dir>/backups` | Where snapshots are written |
-| `LIFEMAN_ALLOW_NETWORK` | `false` | Allow non-loopback peers to reach `/api/*` (with paired-device tokens). UI surface stays loopback-only. |
+| `LIFEMAN_ALLOW_NETWORK` | `false` | Allow non-loopback peers to reach `/api/*` (with paired-device tokens). UI surface stays loopback-only. When true and `LIFEMAN_HOST` is unset, the kernel binds to `0.0.0.0` instead of loopback. |
 
 ## License
 
