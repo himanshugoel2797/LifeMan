@@ -123,6 +123,20 @@ class DeviceChannel(OutputChannel):
             },
             target=self.manifest.name,
         )
+
+        # If the device has no live SSE subscriber, try the registered
+        # UnifiedPush endpoint to wake the app. Fire-and-forget: the SSE
+        # publish + ``output_deliveries`` row are the authoritative state;
+        # the push is just a nudge. Done after the publish so the bus
+        # state we sample is the same one a freshly-reconnecting device
+        # would see.
+        if not bus.has_targeted_subscriber(self.manifest.name):
+            await _maybe_send_wake_push(
+                self.device_id,
+                output_id=event.output_id,
+                delivery_id=delivery_id,
+            )
+
         return DeliveryResult(
             delivered=True,
             delivery_id=delivery_id,
@@ -141,6 +155,32 @@ class DeviceChannel(OutputChannel):
             target=self.manifest.name,
         )
         return True
+
+
+async def _maybe_send_wake_push(
+    device_id: str, *, output_id: str, delivery_id: str | None,
+) -> None:
+    """Best-effort wake to the device's UnifiedPush endpoint.
+
+    Lazily imports to avoid a hard dependency cycle: ``lifeman.push`` only
+    runs when an actual wake fires, not on every device-channel deliver.
+    """
+    from lifeman import devices as devices_mod
+    from lifeman import push
+
+    endpoint = await devices_mod.get_device_push_endpoint(device_id)
+    if endpoint is None:
+        return
+    result = await push.send_wake_push(
+        device_id=device_id,
+        transport=endpoint.transport,
+        endpoint=endpoint.endpoint,
+        output_id=output_id,
+        delivery_id=delivery_id,
+    )
+    if result == "gone":
+        # Subscription was revoked at the distributor. Don't try again.
+        await devices_mod.clear_device_push_endpoint(device_id)
 
 
 def register_device_channel(

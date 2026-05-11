@@ -6,6 +6,7 @@ from lifeman.routes import (
     auth,
     build_requests,
     chat,
+    devices,
     inputs,
     memory,
     observations,
@@ -30,6 +31,7 @@ api_router.include_router(observations.router, prefix="/observations", tags=["ob
 api_router.include_router(secrets.router, prefix="/secrets", tags=["secrets"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+api_router.include_router(devices.router, prefix="/devices", tags=["devices"])
 api_router.include_router(system.router, tags=["system"])
 
 ui_router = ui.router

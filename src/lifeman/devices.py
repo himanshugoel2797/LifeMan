@@ -290,7 +290,8 @@ async def revoke_device(device_id: str) -> bool:
     was already revoked."""
     db = await get_db()
     cur = await db.execute(
-        "UPDATE device_tokens SET revoked_at = ? "
+        "UPDATE device_tokens SET revoked_at = ?, "
+        "push_transport = NULL, push_endpoint = NULL "
         "WHERE id = ? AND revoked_at IS NULL",
         (_now(), device_id),
     )
@@ -302,3 +303,69 @@ async def revoke_device(device_id: str) -> bool:
         unregister_device_channel(device_id)
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Push endpoint management
+# ---------------------------------------------------------------------------
+#
+# A paired device may register a UnifiedPush distributor endpoint with the
+# kernel so we can wake the app when an output is queued and the SSE
+# connection is offline. The endpoint URL is opaque to the kernel — the
+# distributor issued it and routes incoming POSTs to the device. We only
+# need to remember which URL belongs to which device.
+
+PUSH_TRANSPORTS = ("unifiedpush",)
+
+
+@dataclass(frozen=True)
+class PushEndpoint:
+    transport: str
+    endpoint: str
+
+
+async def set_device_push_endpoint(
+    device_id: str, *, transport: str, endpoint: str,
+) -> bool:
+    """Store this device's push endpoint. Returns False if the device row
+    is missing or revoked."""
+    if transport not in PUSH_TRANSPORTS:
+        raise ValueError(f"unsupported push transport: {transport!r}")
+    db = await get_db()
+    cur = await db.execute(
+        "UPDATE device_tokens SET push_transport = ?, push_endpoint = ? "
+        "WHERE id = ? AND revoked_at IS NULL",
+        (transport, endpoint, device_id),
+    )
+    await db.commit()
+    return (cur.rowcount or 0) > 0
+
+
+async def clear_device_push_endpoint(device_id: str) -> bool:
+    """Wipe a device's push endpoint (uninstall, app data clear, 410 Gone)."""
+    db = await get_db()
+    cur = await db.execute(
+        "UPDATE device_tokens SET push_transport = NULL, push_endpoint = NULL "
+        "WHERE id = ?",
+        (device_id,),
+    )
+    await db.commit()
+    return (cur.rowcount or 0) > 0
+
+
+async def get_device_push_endpoint(device_id: str) -> PushEndpoint | None:
+    """Look up the push endpoint registered for this device, if any."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT push_transport, push_endpoint FROM device_tokens "
+        "WHERE id = ? AND revoked_at IS NULL",
+        (device_id,),
+    )
+    if not rows:
+        return None
+    r = dict(rows[0])
+    transport = r.get("push_transport")
+    endpoint = r.get("push_endpoint")
+    if not transport or not endpoint:
+        return None
+    return PushEndpoint(transport=transport, endpoint=endpoint)

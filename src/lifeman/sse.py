@@ -101,6 +101,20 @@ class EventBus:
                     sub.id, sub.dropped,
                 )
 
+    def has_targeted_subscriber(self, target: str) -> bool:
+        """Whether any subscriber is currently listening for *exactly* this
+        target audience.
+
+        ``master`` subscribers (the loopback UI) are deliberately ignored —
+        their presence on the bus does not satisfy a device's wake-up
+        requirement. The caller uses this to decide whether to fire a
+        side-channel push (e.g. UnifiedPush) to the device.
+        """
+        for sub in self._subscribers:
+            if sub.audience == target:
+                return True
+        return False
+
     async def subscribe(
         self,
         since_seq: int | None = None,

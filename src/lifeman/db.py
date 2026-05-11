@@ -508,6 +508,13 @@ _MIGRATIONS: list[tuple[int, str]] = [
         )
         """,
     ),
+    # Per-device wake-up push transport (UnifiedPush). Stores the
+    # distributor-issued endpoint URL the kernel POSTs to when a targeted
+    # output event arrives and the device has no live SSE connection. One
+    # transport per device — adding another transport later means a new
+    # table, not a generalisation of these columns.
+    (15, "ALTER TABLE device_tokens ADD COLUMN push_transport TEXT"),
+    (16, "ALTER TABLE device_tokens ADD COLUMN push_endpoint TEXT"),
 ]
 
 
