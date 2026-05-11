@@ -514,6 +514,29 @@ _MIGRATIONS: list[tuple[int, str]] = [
     # table, not a generalisation of these columns.
     (15, "ALTER TABLE device_tokens ADD COLUMN push_transport TEXT"),
     (16, "ALTER TABLE device_tokens ADD COLUMN push_endpoint TEXT"),
+    # Input subscriptions: kernel-side pollers + webhook receivers that
+    # turn external sources (webhooks, JSON endpoints, …) into input_events.
+    # See lifeman.input_subscriptions.
+    (
+        17,
+        """
+        CREATE TABLE IF NOT EXISTS input_subscriptions (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,                -- webhook | json_poll
+            name TEXT NOT NULL,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            interval_seconds INTEGER NOT NULL DEFAULT 300,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            secret_hash TEXT,                  -- sha256 of webhook secret, NULL for pollers
+            last_polled_at TEXT,
+            last_etag TEXT,
+            last_hash TEXT,
+            last_status TEXT,                  -- ok | unchanged | error
+            last_error TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 
