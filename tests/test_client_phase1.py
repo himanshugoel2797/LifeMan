@@ -268,6 +268,59 @@ async def test_urgent_dispatch_reaches_device_channel(app_transport):
 
 
 @pytest.mark.asyncio
+async def test_output_deliver_sse_payload_carries_delivered_at(app_transport):
+    """The SSE `output.deliver` data must include `delivered_at`, and it
+    must equal the value persisted in `output_deliveries`.
+
+    The client uses pending.cursor (a delivered_at) to ask `/pending?since=…`
+    on reconnect. For live SSE events to advance the same cursor correctly
+    the wire and DB values must be identical — otherwise the next reconnect
+    either re-fetches recent events or skips a late-arriver.
+    """
+    transport, token, _ = app_transport
+    pair = await _pair(transport, token, name="WithCursor")
+    name = f"device:{pair['device_id']}"
+
+    from lifeman.sse import bus
+    watermark = bus._seq
+    sub = bus.subscribe(since_seq=watermark, audience=name)
+
+    async def _next_deliver(gen):
+        # Drain past the sse.sync sentinel and any other channel events
+        # (e.g. the loopback `output.toast`) that fan out from the same
+        # urgent dispatch.
+        async for msg in gen:
+            if msg["event"] == "output.deliver":
+                return msg
+        return None
+
+    from lifeman.outputs.api import emit_output
+    resp = await emit_output(
+        content="payload-has-cursor",
+        category="alert",
+        urgency="urgent",
+        source_tool="test",
+    )
+    msg = await asyncio.wait_for(_next_deliver(sub), timeout=1.0)
+    await sub.aclose()
+
+    assert msg["event"] == "output.deliver"
+    assert "delivered_at" in msg["data"], msg["data"]
+    sse_delivered_at = msg["data"]["delivered_at"]
+    assert sse_delivered_at, "delivered_at on the wire must be a real timestamp"
+
+    from lifeman.db import get_db
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT delivered_at FROM output_deliveries "
+        "WHERE output_id = ? AND channel = ?",
+        (resp.output_id, name),
+    )
+    assert rows
+    assert rows[0]["delivered_at"] == sse_delivered_at
+
+
+@pytest.mark.asyncio
 async def test_sse_audience_isolates_device_streams(app_transport):
     """A targeted bus event must reach the right device subscriber only."""
     transport, token, _ = app_transport

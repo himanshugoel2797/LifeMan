@@ -112,6 +112,11 @@ class DeliveryResult(BaseModel):
     delivery_id: str | None = None
     failure_reason: str | None = None
     response: "UserResponse | None" = None
+    # Server-authoritative timestamp the channel stamped on the wire payload
+    # (e.g. SSE `output.deliver`). Threading it back through DeliveryResult
+    # lets ``output_deliveries.delivered_at`` match the value the client
+    # already received, so reconnect cursors line up exactly.
+    delivered_at: str | None = None
 
 
 class UserResponse(BaseModel):

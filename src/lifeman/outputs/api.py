@@ -189,6 +189,12 @@ async def emit_output(
         # If a concurrent cancel_output flipped status to `cancel_pending`,
         # the UPDATE matches zero rows and we honour the cancel below.
         target_status = "delivered" if result.delivered else "failed"
+        # Prefer the channel's own delivered_at so the value lines up with
+        # whatever it stamped onto the wire payload (e.g. the SSE
+        # `output.deliver` event). Channels that don't surface one fall
+        # back to "now"; this keeps the DB row's delivered_at matching the
+        # cursor a connected device would extract from a live event.
+        delivered_at_value = result.delivered_at or datetime.now(timezone.utc).isoformat()
         cursor = await db.execute(
             """UPDATE output_deliveries
                   SET delivered = ?, delivery_id = ?, failure_reason = ?,
@@ -199,7 +205,7 @@ async def emit_output(
                 result.delivery_id,
                 result.failure_reason,
                 target_status,
-                datetime.now(timezone.utc).isoformat(),
+                delivered_at_value,
                 delivery_row_id,
             ),
         )

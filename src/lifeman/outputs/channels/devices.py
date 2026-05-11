@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from lifeman.outputs.models import (
     ChannelCapabilities,
@@ -99,6 +100,13 @@ class DeviceChannel(OutputChannel):
 
     async def deliver(self, event: OutputEvent) -> DeliveryResult:
         delivery_id = str(uuid.uuid4())[:12]
+        # Stamp delivered_at here so the value the device sees on the SSE
+        # wire is the same one ``output_deliveries.delivered_at`` will hold
+        # after the API layer's UPDATE. That equality is what lets the
+        # client advance its `/pending?since=…` cursor from live SSE events
+        # without guessing a receive-time fallback (see
+        # LifeManClient/docs/PARENT_REPO_REQUESTS.md).
+        delivered_at = datetime.now(timezone.utc).isoformat()
         await bus.publish(
             "output.deliver",
             {
@@ -111,10 +119,15 @@ class DeviceChannel(OutputChannel):
                 "actions": [a.model_dump() for a in event.actions],
                 "source_tool": event.source_tool,
                 "expires_at": event.expires_at,
+                "delivered_at": delivered_at,
             },
             target=self.manifest.name,
         )
-        return DeliveryResult(delivered=True, delivery_id=delivery_id)
+        return DeliveryResult(
+            delivered=True,
+            delivery_id=delivery_id,
+            delivered_at=delivered_at,
+        )
 
     async def cancel(self, output_id: str, delivery_id: str | None) -> bool:
         await bus.publish(
